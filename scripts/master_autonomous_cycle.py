@@ -210,11 +210,11 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         except Exception:
             pass
 
-        # 2. Live chat text check: does the chat window contain our agent's previous pitch markers?
+        # 2. Live chat text check: inspect ONLY the active thread message list (NEVER 'main', which includes left-sidebar inbox previews!)
         chat_text = ""
         try:
-            chat_container = page.locator('.msg-s-message-list, .msg-s-message-list-container, main').first
-            if chat_container.is_visible():
+            chat_container = page.locator('.msg-s-message-list, .msg-s-message-list-container').first
+            if chat_container.count() > 0 and chat_container.is_visible():
                 chat_text = chat_container.inner_text().lower()
                 if any(sig in chat_text for sig in ["drive.google.com", "1i-4mk7lm3food_6e6gkfuyx9l_ikhk4q", "pricing telemetry", "merchant conversion"]):
                     has_agent_sent_prior_pitch = True
