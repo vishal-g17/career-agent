@@ -11,7 +11,7 @@ DB_PATH = os.environ.get("DATABASE_PATH", str(config.DATABASE_PATH))
 def get_connection() -> sqlite3.Connection:
     db_path = os.environ.get("DATABASE_PATH", DB_PATH)
     needs_init = not os.path.exists(db_path) or os.path.getsize(db_path) == 0
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")  # Write-Ahead Logging for high concurrency
     if needs_init:

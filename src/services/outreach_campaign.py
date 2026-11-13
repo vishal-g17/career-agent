@@ -91,26 +91,24 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
     params.append(batch_size)
 
     leads = conn.execute(query, params).fetchall()
+    conn.close()
 
     if not leads:
         print("[OutreachCampaign] No pending leads found matching criteria.")
         return {"attempted": 0, "sent": 0, "bounced": 0, "results": []}
 
-    senders = get_active_senders(sender_mode)
-    print(f"[OutreachCampaign] Initiating batch of {len(leads)} cold outreach emails across senders: {senders}...")
-    results = []
-    sent_count = 0
-    bounced_count = 0
-
-    for i, lead in enumerate(leads):
+    # Pre-filter exclusions & partition leads across simultaneous active senders (disjoint lanes -> 0 duplicates)
+    clean_leads = []
+    for lead in leads:
         lead_id = lead["id"]
         name = lead["name"] or "Hiring Team"
         email_addr = lead["email"]
         company = lead["company"] or "Your Team"
 
-        # Strict Exclusion Filters E1, E2, E3 + Discarded/Bounced List
         if is_bounced_or_discarded(email_addr):
             print(f"[OutreachCampaign] [DISCARDED_BOUNCE] Permanently skipping {name} ({company}, {email_addr})")
+            with database.get_connection() as c:
+                c.execute("UPDATE outreach_leads SET status = 'bounced' WHERE id = ?", (lead_id,))
             continue
 
         exclusion = is_excluded(name=name, headline=f"{company} {email_addr}")
@@ -120,78 +118,113 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
                 c.execute("UPDATE outreach_leads SET status = 'excluded' WHERE id = ?", (lead_id,))
             continue
 
-        # Round-robin selection across senders still below their daily cap (500 Gmail / 1500 NSUT)
-        eligible_senders = [
-            s for s in senders
-            if today_counts.get(s.lower(), 0) < get_sender_daily_cap(s)
-        ]
-        if not eligible_senders:
-            print(f"[OutreachCampaign] Daily sender caps reached mid-batch ({today_counts}). Stopping batch.")
-            return {
-                "attempted": i,
-                "sent": sent_count,
-                "bounced": bounced_count,
-                "daily_cap_reached": True,
-                "results": results,
-            }
-        current_sender = eligible_senders[i % len(eligible_senders)]
+        clean_leads.append(dict(lead))
 
-        # 1. Compose tailored 1-on-1 pitch with appropriate institutional signature
-        mail_data = compose_cold_email(
-            recipient_email=email_addr,
-            role_title="Business / Product Analyst / Management",
-            company_name=company,
-            sender_email=current_sender
-        )
+    if not clean_leads:
+        return {"attempted": 0, "sent": 0, "bounced": 0, "results": []}
 
-        # 2. Dispatch via verified SMTP with anti-bounce protection
-        success = send_cold_email_smtp(
-            recipient_email=email_addr,
-            subject=mail_data["subject"],
-            body=mail_data["body"],
-            sender_email=current_sender
-        )
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
 
-        with database.get_connection() as c:
-            if success:
-                c.execute(
-                    """
-                    UPDATE outreach_leads 
-                    SET status = 'sent', sender_email = ?, first_sent_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP,
-                        last_subject = ?
-                    WHERE id = ?
-                    """,
-                    (current_sender, mail_data["subject"], lead_id)
-                )
-                sent_count += 1
-                today_counts[current_sender.lower()] = today_counts.get(current_sender.lower(), 0) + 1
-                cap_cur = get_sender_daily_cap(current_sender)
-                status_str = f"sent via {current_sender} ({today_counts[current_sender.lower()]}/{cap_cur} today)"
-            else:
-                c.execute("UPDATE outreach_leads SET status = 'bounced' WHERE id = ?", (lead_id,))
-                bounced_count += 1
-                status_str = "bounced/blocked"
+    # Partition leads into parallel buckets per eligible sender while respecting remaining daily caps
+    sender_buckets: Dict[str, List[Dict[str, Any]]] = {s: [] for s in available_init}
+    sender_rem: Dict[str, int] = {
+        s: max(0, get_sender_daily_cap(s) - today_counts.get(s.lower(), 0))
+        for s in available_init
+    }
 
-        results.append({
-            "name": name,
-            "email": email_addr,
-            "company": company,
-            "sender": current_sender,
-            "status": status_str
-        })
+    rr_idx = 0
+    for ld in clean_leads:
+        open_senders = [s for s in available_init if len(sender_buckets[s]) < sender_rem[s]]
+        if not open_senders:
+            break
+        chosen_s = open_senders[rr_idx % len(open_senders)]
+        sender_buckets[chosen_s].append(ld)
+        rr_idx += 1
 
-        if i < len(leads) - 1:
-            # Randomized sub-20-second delay (4.5s - 19.5s)
-            jitter = round(random.uniform(4.5, 19.5), 1)
-            print(f"[OutreachCampaign] Random <20s timer: waiting {jitter}s before next send ({i+1}/{len(leads)})...")
-            time.sleep(jitter)
+    active_lanes = {s: b for s, b in sender_buckets.items() if b}
+    if not active_lanes:
+        return {"attempted": 0, "sent": 0, "bounced": 0, "daily_cap_reached": True, "results": []}
 
-    print(f"[OutreachCampaign] Batch complete. Sent: {sent_count}, Bounced/Blocked: {bounced_count}")
+    print(
+        f"[OutreachCampaign] ⚡ Firing SIMULTANEOUS parallel lanes across {list(active_lanes.keys())} "
+        f"({', '.join(f'{s}: {len(b)} leads' for s, b in active_lanes.items())})..."
+    )
+
+    db_lock = threading.Lock()
+    results: List[Dict[str, Any]] = []
+    counters = {"sent": 0, "bounced": 0, "attempted": 0}
+
+    def _run_sender_lane(sender_addr: str, lane_leads: List[Dict[str, Any]]) -> None:
+        cap_cur = get_sender_daily_cap(sender_addr)
+        for idx, ld in enumerate(lane_leads):
+            l_id = ld["id"]
+            l_name = ld.get("name") or "Hiring Team"
+            l_email = ld["email"]
+            l_comp = ld.get("company") or "Your Team"
+
+            mail_data = compose_cold_email(
+                recipient_email=l_email,
+                role_title="Business / Product Analyst / Management",
+                company_name=l_comp,
+                sender_email=sender_addr,
+            )
+            ok = send_cold_email_smtp(
+                recipient_email=l_email,
+                subject=mail_data["subject"],
+                body=mail_data["body"],
+                sender_email=sender_addr,
+            )
+
+            with db_lock:
+                counters["attempted"] += 1
+                with database.get_connection() as c:
+                    if ok:
+                        c.execute(
+                            """
+                            UPDATE outreach_leads 
+                            SET status = 'sent', sender_email = ?, first_sent_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP,
+                                last_subject = ?
+                            WHERE id = ?
+                            """,
+                            (sender_addr, mail_data["subject"], l_id),
+                        )
+                        counters["sent"] += 1
+                        today_counts[sender_addr.lower()] = today_counts.get(sender_addr.lower(), 0) + 1
+                        status_str = f"sent via {sender_addr} ({today_counts[sender_addr.lower()]}/{cap_cur} today)"
+                    else:
+                        c.execute("UPDATE outreach_leads SET status = 'bounced' WHERE id = ?", (l_id,))
+                        counters["bounced"] += 1
+                        status_str = "bounced/blocked"
+
+                results.append({
+                    "name": l_name,
+                    "email": l_email,
+                    "company": l_comp,
+                    "sender": sender_addr,
+                    "status": status_str,
+                })
+
+            if idx < len(lane_leads) - 1:
+                jitter = round(random.uniform(4.5, 19.5), 1)
+                print(f"[OutreachCampaign:{sender_addr}] Random <20s timer: waiting {jitter}s ({idx+1}/{len(lane_leads)})...")
+                time.sleep(jitter)
+
+    with ThreadPoolExecutor(max_workers=len(active_lanes)) as pool:
+        futures = [pool.submit(_run_sender_lane, s, b) for s, b in active_lanes.items()]
+        for fut in futures:
+            fut.result()
+
+    all_capped_after = all(
+        today_counts.get(s.lower(), 0) >= get_sender_daily_cap(s) for s in senders
+    )
+    print(f"[OutreachCampaign] Simultaneous batch complete. Sent: {counters['sent']}, Bounced/Blocked: {counters['bounced']}")
     return {
-        "attempted": len(leads),
-        "sent": sent_count,
-        "bounced": bounced_count,
-        "results": results
+        "attempted": counters["attempted"],
+        "sent": counters["sent"],
+        "bounced": counters["bounced"],
+        "daily_cap_reached": all_capped_after,
+        "results": results,
     }
 
 def process_pending_followups(max_followups: int = 15) -> Dict[str, Any]:
