@@ -9,12 +9,15 @@ Serves:
   - /download/ACTIVE_DELIVERED_LEADS.csv-> Direct 1-click clean CSV download
 """
 
+import hashlib
 import html
+import json
 import os
 import sqlite3
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -36,6 +39,34 @@ ADDR = os.environ.get("FOLIO_ADDR", "127.0.0.1")
 _CACHE = {"dash_html": b"", "dash_ts": 0.0, "sheet_html": b"", "sheet_ts": 0.0, "xlsx_ts": 0.0}
 _EXPORT_LOCK = threading.Lock()
 CACHE_TTL_SECONDS = 20.0
+
+
+def _get_bridge_key() -> str:
+    tok = os.environ.get("DISCORD_BOT_TOKEN", "")
+    if not tok and (PROJECT_ROOT / ".env").exists():
+        for ln in (PROJECT_ROOT / ".env").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if ln.startswith("DISCORD_BOT_TOKEN="):
+                tok = ln.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    return hashlib.sha256((tok or "career-agent-priority").encode("utf-8")).hexdigest()[:24]
+
+
+def _ensure_priority_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS priority_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            channel_id TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            result_msg TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP
+        )
+        """
+    )
+    conn.commit()
 
 
 def get_cached_dashboard_html() -> bytes:
@@ -263,10 +294,61 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._handle_req(head_only=False)
 
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        qs = urllib.parse.parse_qs(parsed.query)
+        if path == "/api/priority-task/complete":
+            key = (qs.get("key") or [""])[0]
+            if key != _get_bridge_key():
+                self.send_response(403)
+                self.end_headers()
+                return
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            data = json.loads(raw.decode("utf-8"))
+            conn = sqlite3.connect(str(DB_PATH), timeout=20.0)
+            _ensure_priority_table(conn)
+            conn.execute(
+                "UPDATE priority_tasks SET status = ?, result_msg = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (data.get("status", "done"), data.get("result_msg", ""), int(data["id"])),
+            )
+            conn.commit()
+            conn.close()
+            self._send_bytes(b'{"ok":true}', "application/json; charset=utf-8")
+            return
+        self.send_response(404)
+        self.end_headers()
+
     def _handle_req(self, head_only: bool = False):
-        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        qs = urllib.parse.parse_qs(parsed.query)
         if path == "/healthz":
             self._send_bytes(b"ok", "text/plain; charset=utf-8", head_only=head_only)
+            return
+
+        if path == "/api/priority-task/claim" and not head_only:
+            key = (qs.get("key") or [""])[0]
+            if key != _get_bridge_key():
+                self.send_response(403)
+                self.end_headers()
+                return
+            conn = sqlite3.connect(str(DB_PATH), timeout=20.0)
+            _ensure_priority_table(conn)
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT id, task_type, payload_json, channel_id FROM priority_tasks WHERE status = ? ORDER BY id ASC LIMIT 1",
+                ("pending",),
+            ).fetchone()
+            if row:
+                cur.execute("UPDATE priority_tasks SET status = ? WHERE id = ?", ("running", row[0]))
+                conn.commit()
+                resp = {"task": {"id": row[0], "task_type": row[1], "payload": json.loads(row[2]), "channel_id": row[3]}}
+            else:
+                resp = {"task": None}
+            conn.close()
+            self._send_bytes(json.dumps(resp).encode("utf-8"), "application/json; charset=utf-8")
             return
 
         if path in ("/", "/p/dashboard", "/dashboard"):

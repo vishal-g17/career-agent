@@ -1,144 +1,124 @@
 #!/usr/bin/env python3
 """
-Local Mac LinkedIn Ad-Hoc Task Consumer (Cloud VM -> Mac Ridealong Bridge).
-Polls Cloud VM SQLite `linkedin_adhoc_tasks` every 6s; whenever a user requests an on-demand
-LinkedIn message in Discord #prompt, executes it on Local Mac Ridealong Chrome and posts
-the verified result back into Discord #prompt.
+Local Mac Priority #0 Task Consumer (1.2-Second HTTPS Bridge from Cloud VM #prompt).
+Polls Cloud VM's `/api/priority-task/claim` over HTTPS every 1.2s (0.08s latency, zero SSH overhead).
+Executes ANY #prompt Mac task (`linkedin_msg`, `linkedin_apply`, `mac_sh`) IMMEDIATELY on Priority #0
+and reports the verified result back synchronously to Cloud VM so #prompt replies with real proof!
 """
 
-import base64
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.send_linkedin_person_msg import send_person_outreach
+from scripts.priority_exec import execute_mac_task_locally
 from src.engine.discord_client import DiscordClient
 from src import config
 
 SSH_KEY = os.path.expanduser("~/Downloads/agent-vm-key.key")
 VM_HOST = "opc@130.210.108.55"
-VM_PY = "/home/opc/career-agent/venv/bin/python3"
 
 
-def claim_next_cloud_task():
-    remote_py = (
-        "import json, sqlite3; "
-        "conn = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=15.0); "
-        "conn.execute('CREATE TABLE IF NOT EXISTS linkedin_adhoc_tasks ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT NOT NULL, name_hint TEXT DEFAULT \"\", "
-        "company_hint TEXT DEFAULT \"\", role_hint TEXT DEFAULT \"\", channel_id TEXT DEFAULT \"\", "
-        "status TEXT DEFAULT \"pending\", result_msg TEXT DEFAULT \"\", "
-        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, completed_at TIMESTAMP)'); "
-        "cur = conn.cursor(); "
-        "row = cur.execute(\"SELECT id, query, name_hint, company_hint, role_hint, channel_id "
-        "FROM linkedin_adhoc_tasks WHERE status='pending' ORDER BY id ASC LIMIT 1\").fetchone(); "
-        "if row: cur.execute(\"UPDATE linkedin_adhoc_tasks SET status='running' WHERE id=?\", (row[0],)); conn.commit(); "
-        "conn.close(); "
-        "print(json.dumps(row) if row else '')"
-    )
-    # Note: one-line Python cannot mix inline `if row:` after `;` — use clean multi-line script via stdin!
-    remote_script = """
-import json, sqlite3
-conn = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=15.0)
-conn.execute('''CREATE TABLE IF NOT EXISTS linkedin_adhoc_tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    query TEXT NOT NULL,
-    name_hint TEXT DEFAULT '',
-    company_hint TEXT DEFAULT '',
-    role_hint TEXT DEFAULT '',
-    channel_id TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',
-    result_msg TEXT DEFAULT '',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    completed_at TIMESTAMP
-)''')
-cur = conn.cursor()
-row = cur.execute(
-    "SELECT id, query, name_hint, company_hint, role_hint, channel_id FROM linkedin_adhoc_tasks WHERE status = ? ORDER BY id ASC LIMIT 1",
-    ('pending',)
-).fetchone()
-if row:
-    cur.execute("UPDATE linkedin_adhoc_tasks SET status = ? WHERE id = ?", ('running', row[0]))
-    conn.commit()
-conn.close()
-print(json.dumps(row) if row else '')
-"""
-    proc = subprocess.run(
-        ["ssh", "-i", SSH_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", VM_HOST, f"{VM_PY} -"],
-        input=remote_script,
-        text=True,
-        capture_output=True,
-        timeout=12,
-    )
-    out = (proc.stdout or "").strip()
-    if not out:
-        return None
-    return json.loads(out)
+def get_bridge_key() -> str:
+    tok = os.environ.get("DISCORD_BOT_TOKEN", "")
+    if not tok and (PROJECT_ROOT / ".env").exists():
+        for ln in (PROJECT_ROOT / ".env").read_text(encoding="utf-8", errors="ignore").splitlines():
+            if ln.startswith("DISCORD_BOT_TOKEN="):
+                tok = ln.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+    return hashlib.sha256((tok or "career-agent-priority").encode("utf-8")).hexdigest()[:24]
 
 
-def complete_cloud_task(task_id: int, status: str, result_msg: str) -> None:
-    payload_b64 = base64.b64encode(json.dumps({"id": task_id, "status": status, "msg": result_msg}).encode()).decode()
-    remote_script = f"""
-import base64, json, sqlite3
-d = json.loads(base64.b64decode("{payload_b64}").decode())
-conn = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=15.0)
-conn.execute(
-    "UPDATE linkedin_adhoc_tasks SET status = ?, result_msg = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?",
-    (d['status'], d['msg'], d['id'])
-)
-conn.commit()
-conn.close()
-"""
-    subprocess.run(
-        ["ssh", "-i", SSH_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", VM_HOST, f"{VM_PY} -"],
-        input=remote_script,
-        text=True,
-        capture_output=True,
-        timeout=12,
-    )
+def discover_cloud_base_url() -> str:
+    try:
+        proc = subprocess.run(
+            [
+                "ssh", "-i", SSH_KEY, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                VM_HOST, "cat /home/opc/.cloudflared_dashboard.log 2>/dev/null || true",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        matches = re.findall(r"https://[a-z0-9-]+\.trycloudflare\.com", proc.stdout or "")
+        if matches:
+            return matches[-1].rstrip("/")
+    except Exception:
+        pass
+    return os.environ.get("DASHBOARD_PUBLIC_URL", "https://villa-foods-mesa-ing.trycloudflare.com").rstrip("/")
 
 
 def main():
-    print("[MacLinkedInBridge] Active — polling Cloud VM `linkedin_adhoc_tasks` every 6s for #prompt LinkedIn requests...")
+    key = get_bridge_key()
+    base_url = discover_cloud_base_url()
     discord = DiscordClient()
     default_ch = getattr(config, "DISCORD_PROMPT_CHANNEL_ID", "1570342549435187290")
+    consec_errs = 0
+
+    print(f"[MacPriorityBridge] Active — polling {base_url}/api/priority-task/claim every 1.2s...")
 
     while True:
         try:
-            row = claim_next_cloud_task()
-            if row:
-                tid, query, name_h, comp_h, role_h, ch_id = row
-                target_ch = ch_id or default_ch
-                print(f"[MacLinkedInBridge] Executing task #{tid}: query='{query}' name='{name_h}' company='{comp_h}' role='{role_h}'")
+            req = urllib.request.Request(
+                f"{base_url}/api/priority-task/claim?key={key}",
+                headers={"User-Agent": "CareerAgentMacPriority/1.0"},
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            consec_errs = 0
+
+            task = data.get("task")
+            if task:
+                tid = task["id"]
+                ttype = task["task_type"]
+                payload = task["payload"]
+                ch_id = task.get("channel_id") or default_ch
+                t0 = time.time()
+                print(f"[MacPriorityBridge] ⚡ Executing Priority #0 task #{tid} ({ttype}): {payload}")
                 try:
-                    res = send_person_outreach(
-                        query=query,
-                        name_hint=name_h,
-                        company_hint=comp_h,
-                        role_hint=role_h,
-                    )
-                    msg = res.get("message") or json.dumps(res)
-                    status = "done" if res.get("ok") else "failed"
+                    result_msg = execute_mac_task_locally(ttype, payload)
+                    status = "failed" if result_msg.startswith("❌") or result_msg.startswith("⚠️") else "done"
                 except Exception as ex:
-                    msg = f"❌ LinkedIn On-Demand Execution Error for `{query}`: `{ex}`"
+                    result_msg = f"❌ Priority Execution Error (`{ttype}`): `{ex}`"
                     status = "failed"
 
-                complete_cloud_task(tid, status, msg)
-                try:
-                    discord.send_message(target_ch, msg)
-                except Exception as de:
-                    print(f"[MacLinkedInBridge] Discord notify error: {de}")
-                print(f"[MacLinkedInBridge] Completed task #{tid} ({status}): {msg}")
-        except Exception as e:
-            print(f"[MacLinkedInBridge] Poll note: {e}")
+                elapsed = time.time() - t0
+                body = json.dumps({"id": tid, "status": status, "result_msg": result_msg}).encode("utf-8")
+                post_req = urllib.request.Request(
+                    f"{base_url}/api/priority-task/complete?key={key}",
+                    data=body,
+                    headers={"Content-Type": "application/json", "User-Agent": "CareerAgentMacPriority/1.0"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(post_req, timeout=8) as _:
+                    pass
 
-        time.sleep(6)
+                # If synchronous waiter on Cloud VM already timed out (>42s), post late receipt directly to Discord
+                if elapsed >= 41.0:
+                    try:
+                        discord.send_message(ch_id, result_msg)
+                    except Exception:
+                        pass
+                print(f"[MacPriorityBridge] ✅ Finished task #{tid} in {elapsed:.1f}s: {result_msg[:120]}")
+        except Exception as err:
+            consec_errs += 1
+            if consec_errs >= 5:
+                new_url = discover_cloud_base_url()
+                if new_url != base_url:
+                    print(f"[MacPriorityBridge] Refreshed Cloud Tunnel URL -> {new_url}")
+                    base_url = new_url
+                consec_errs = 0
+            time.sleep(2.0)
+
+        time.sleep(1.2)
 
 
 if __name__ == "__main__":
