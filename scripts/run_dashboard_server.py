@@ -241,7 +241,7 @@ def get_cached_sheet_html() -> bytes:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    def _send_bytes(self, body: bytes, content_type: str, download_name: str = "") -> None:
+    def _send_bytes(self, body: bytes, content_type: str, download_name: str = "", head_only: bool = False) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
@@ -249,30 +249,39 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", f'attachment; filename="{download_name}"')
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if not head_only:
+            self.wfile.write(body)
+
+    def do_HEAD(self):
+        self._handle_req(head_only=True)
 
     def do_GET(self):
+        self._handle_req(head_only=False)
+
+    def _handle_req(self, head_only: bool = False):
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/healthz":
-            self._send_bytes(b"ok", "text/plain; charset=utf-8")
+            self._send_bytes(b"ok", "text/plain; charset=utf-8", head_only=head_only)
             return
 
         if path in ("/", "/p/dashboard", "/dashboard"):
             try:
-                self._send_bytes(get_cached_dashboard_html(), "text/html; charset=utf-8")
+                self._send_bytes(get_cached_dashboard_html(), "text/html; charset=utf-8", head_only=head_only)
             except Exception as exc:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"Dashboard error: {exc}".encode("utf-8"))
+                if not head_only:
+                    self.wfile.write(f"Dashboard error: {exc}".encode("utf-8"))
             return
 
         if path in ("/sheet", "/leads", "/p/sheet"):
             try:
-                self._send_bytes(get_cached_sheet_html(), "text/html; charset=utf-8")
+                self._send_bytes(get_cached_sheet_html(), "text/html; charset=utf-8", head_only=head_only)
             except Exception as exc:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"Sheet error: {exc}".encode("utf-8"))
+                if not head_only:
+                    self.wfile.write(f"Sheet error: {exc}".encode("utf-8"))
             return
 
         if path in ("/download/MASTER_LEADS_SHEET.xlsx", "/sheet.xlsx"):
@@ -282,11 +291,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     OUTPUT_XLSX.read_bytes(),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     "MASTER_LEADS_SHEET.xlsx",
+                    head_only=head_only,
                 )
             except Exception as exc:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"Excel export error: {exc}".encode("utf-8"))
+                if not head_only:
+                    self.wfile.write(f"Excel export error: {exc}".encode("utf-8"))
             return
 
         if path in ("/download/WORKING_LEADS_MASTER.xlsx",):
@@ -296,11 +307,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     OUTPUT_WORKING_XLSX.read_bytes(),
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     "WORKING_LEADS_MASTER.xlsx",
+                    head_only=head_only,
                 )
             except Exception as exc:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"Excel export error: {exc}".encode("utf-8"))
+                if not head_only:
+                    self.wfile.write(f"Excel export error: {exc}".encode("utf-8"))
             return
 
         if path in ("/download/ACTIVE_DELIVERED_LEADS.csv", "/sheet.csv"):
@@ -310,11 +323,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     OUTPUT_ACTIVE_CSV.read_bytes(),
                     "text/csv; charset=utf-8",
                     "ACTIVE_DELIVERED_LEADS.csv",
+                    head_only=head_only,
                 )
             except Exception as exc:
                 self.send_response(500)
                 self.end_headers()
-                self.wfile.write(f"CSV export error: {exc}".encode("utf-8"))
+                if not head_only:
+                    self.wfile.write(f"CSV export error: {exc}".encode("utf-8"))
             return
 
         self.send_response(302)
