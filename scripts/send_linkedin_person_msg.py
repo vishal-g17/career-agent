@@ -213,7 +213,20 @@ def send_person_outreach(
             browser = p.chromium.connect_over_cdp(cdp_ep, timeout=15000)
 
         ctx = browser.contexts[0]
-        page = ctx.new_page()
+        if ctx.pages:
+            page = ctx.pages[0]
+            own_page = False
+        else:
+            # Open 1 tab via Chrome DevTools HTTP if agent has 0 tabs yet
+            if DEVTOOLS_PORT_FILE.exists():
+                port = DEVTOOLS_PORT_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
+                import urllib.request
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/json/new?about:blank", method="PUT")
+                urllib.request.urlopen(req, timeout=4).read()
+                browser = p.chromium.connect_over_cdp(cdp_ep, timeout=10000)
+                ctx = browser.contexts[0]
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            own_page = False
         try:
             cached = None if dry_run else lookup_cached_connection(name_hint or query, company_hint)
             if cached:
@@ -381,7 +394,10 @@ def send_person_outreach(
             }
         finally:
             try:
-                page.close()
+                if own_page:
+                    page.close()
+                else:
+                    page.goto("about:blank", timeout=4000)
             except Exception:
                 pass
 
