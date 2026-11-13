@@ -104,12 +104,22 @@ def queue_discovered_job_url(url: str, role_hint: str, author: str) -> bool:
         return False
 
 
-def queue_email_lead(email: str, author_name: str, company: str, role: str) -> bool:
+def queue_email_lead(email: str, author_name: str, company: str, role: str, post_snippet: str = "") -> bool:
     """Inserts a freshly scraped email from a LinkedIn post directly into outreach_leads."""
     email_clean = email.strip().lower()
     # Filter junk or example emails
     if any(d in email_clean for d in ["example.com", "domain.com", "linkedin.com", "email.com"]):
         return False
+
+    try:
+        from ..services.exclusion_filter import FORBIDDEN_COMPANIES, is_bounced_or_discarded
+        combined = f"{email_clean} {author_name} {company} {post_snippet}".lower()
+        if any(fc in combined for fc in FORBIDDEN_COMPANIES):
+            return False
+        if is_bounced_or_discarded(email_clean):
+            return False
+    except Exception:
+        pass
 
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -170,7 +180,7 @@ def _extract_leads_from_text(main_text: str, source_label: str) -> List[Dict[str
 
             # Auto-queue any extracted emails into outreach_leads!
             for em in emails:
-                queued = queue_email_lead(em, author, "Hiring Lead via LinkedIn Post", role_matched)
+                queued = queue_email_lead(em, author, "Hiring Lead via LinkedIn Post", role_matched, post_snippet=clean[:300])
                 if queued:
                     print(f"  🎯 [Auto-Queued Email from Post Body] {em} (Role: {role_matched} | Post Author: {author})")
 

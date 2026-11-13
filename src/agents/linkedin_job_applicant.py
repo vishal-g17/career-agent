@@ -40,10 +40,11 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
     applied_count = 0
 
     with sync_playwright() as p:
+        page = None
         try:
             browser = p.chromium.connect_over_cdp(RIDEALONG_CDP)
             context = browser.contexts[0]
-            page = context.pages[0] if context.pages else context.new_page()
+            page = context.new_page()
 
             kw_idx = 0
             while time.time() < end_time and applied_count < max_apps:
@@ -236,9 +237,14 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
                     print(f"[LinkedInJobs] Search note for '{kw}': {ke}")
                     time.sleep(5)
 
-            page.close()
         except Exception as be:
             print(f"[LinkedInJobs] Browser error: {be}")
+        finally:
+            if page is not None:
+                try:
+                    page.close()
+                except Exception:
+                    pass
 
     conn.close()
     print(f"\n[LinkedInJobs] Stage complete! Submitted {applied_count} LinkedIn applications.")
