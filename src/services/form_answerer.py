@@ -30,7 +30,9 @@ def answer_standard_field(field_name: str, options: Optional[list] = None) -> Op
     screen = profile.get("screening_defaults", {})
     fn_lower = field_name.lower().strip()
 
-    # Full Name
+    # Full Name / Preferred Name
+    if "preferred name" in fn_lower:
+        return p.get("first_name", "Vishal")
     if any(k in fn_lower for k in ["full name", "your name", "name"]):
         if "first" in fn_lower:
             return p.get("first_name", "")
@@ -67,15 +69,23 @@ def answer_standard_field(field_name: str, options: Optional[list] = None) -> Op
         return "Metabase, Looker, Python (matplotlib/seaborn), Excel, and custom Streamlit dashboards for operational and funnel telemetry."
 
     # Current Company / Employer
-    if any(k in fn_lower for k in ["current company", "current employer", "organization"]):
+    if (
+        fn_lower == "org"
+        or re.search(r'\borg\b', fn_lower)
+        or any(k in fn_lower for k in ["current company", "current employer", "most recent) employer", "most recent employer", "organization", "present employer"])
+    ):
         return "a quick-commerce startup"
 
     # Current Title / Role
-    if any(k in fn_lower for k in ["current title", "current role", "designation"]) and not any(w in fn_lower for w in ["tool", "technique", "visualiz", "describe", "what"]):
+    if any(k in fn_lower for k in ["current title", "current role", "most recent) title", "most recent title", "designation"]) and not any(w in fn_lower for w in ["tool", "technique", "visualiz", "describe", "what is your expected"]):
         return p.get("current_title", "Tech Product Analyst")
 
+    # How did you hear about this job
+    if any(k in fn_lower for k in ["how did you hear", "how did you learn", "source"]):
+        return "Company Careers Page"
+
     # Location / City
-    if any(k in fn_lower for k in ["current location", "current city", "city"]):
+    if any(k in fn_lower for k in ["current location", "current city", "city", "location"]):
         return p.get("city", "Delhi NCR, India")
 
     # Relocation

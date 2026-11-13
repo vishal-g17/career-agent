@@ -361,6 +361,75 @@ def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
         
     return found_jobs
 
+GREENHOUSE_BOARDS = [
+    "inmobi", "groww", "stripe", "coinbase", "rubrik", "druva", "apolloio", "gitlab", "datadog",
+    "twilio", "okta", "mongodb", "elastic", "confluent", "databricks", "coupang", "agoda",
+    "zscaler", "nutanix", "purestorage", "cohesity", "sprinklr", "thoughtspot", "udemy", "coursera",
+    "affirm", "pinterest", "reddit", "discord", "duolingo", "asana", "gusto", "brex", "cloudflare",
+]
+
+
+def scrape_fresh_greenhouse_jobs() -> List[Dict[str, Any]]:
+    """
+    Fetches live India openings directly from official Greenhouse company job boards
+    (zero portal middleman walls, direct company confirmation email receipts).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    india_locs = (
+        "india", "bangalore", "bengaluru", "gurgaon", "gurugram",
+        "delhi", "noida", "mumbai", "pune", "hyderabad", "chennai",
+    )
+
+    def _scan_org(org: str) -> List[Dict[str, Any]]:
+        org_jobs: List[Dict[str, Any]] = []
+        if any(b in org.lower() for b in BLACKLISTED_COMPANIES):
+            return org_jobs
+        try:
+            api_url = f"https://boards-api.greenhouse.io/v1/boards/{org}/jobs"
+            req = urllib.request.Request(api_url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            for item in data.get("jobs", []):
+                loc = ((item.get("location") or {}).get("name") or "").strip()
+                title = (item.get("title") or "").strip()
+                jid = item.get("id")
+                if not title or not jid or not any(k in loc.lower() for k in india_locs):
+                    continue
+                sc, _ = score_job_heuristic(title, org)
+                if sc < 75:
+                    continue
+                abs_url = (item.get("absolute_url") or "").strip()
+                target_url = (
+                    abs_url
+                    if "greenhouse.io" in abs_url
+                    else f"https://boards.greenhouse.io/embed/job_app?for={org}&token={jid}"
+                )
+                dedup_id = generate_dedup_id(title, org, loc)
+                org_jobs.append(
+                    {
+                        "dedup_id": dedup_id,
+                        "job_id": f"gh_{org}_{jid}",
+                        "title": title,
+                        "company": org.capitalize(),
+                        "location": loc,
+                        "url": target_url,
+                        "posted_time": (item.get("updated_at") or "Recent")[:10],
+                        "platform": "Greenhouse ATS",
+                        "keyword_matched": "Direct Greenhouse Board",
+                    }
+                )
+        except Exception:
+            pass
+        return org_jobs
+
+    found: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        for batch in pool.map(_scan_org, GREENHOUSE_BOARDS):
+            found.extend(batch)
+    return found
+
+
 def run_job_hunt() -> Dict[str, Any]:
     """
     Executes a unified multi-platform job hunting scan across:
@@ -401,6 +470,16 @@ def run_job_hunt() -> Dict[str, Any]:
                 all_fresh.append(j)
     except Exception as e:
         print(f"[JobHunter] Naukri batch run failed: {e}")
+
+    # 4. Direct Greenhouse Company ATS Boards (India high-fit roles)
+    try:
+        gh_jobs = scrape_fresh_greenhouse_jobs()
+        for j in gh_jobs:
+            if j["dedup_id"] not in seen_in_run:
+                seen_in_run.add(j["dedup_id"])
+                all_fresh.append(j)
+    except Exception as e:
+        print(f"[JobHunter] Greenhouse direct scan failed: {e}")
 
     new_jobs = []
     hot_matches = []

@@ -90,9 +90,16 @@ def run_naukri_batch(limit: int = 50):
 
             elif status == "external_redirect":
                 redirect_count += 1
-                cur.execute('UPDATE jobs SET status = "external_redirect" WHERE id = ?', (jid,))
+                ext_url = res.get("external_url")
+                if ext_url and ext_url.startswith("http") and "naukri.com" not in ext_url:
+                    cur.execute(
+                        'UPDATE jobs SET status = "external_redirect", url = ? WHERE id = ?',
+                        (ext_url, jid),
+                    )
+                else:
+                    cur.execute('UPDATE jobs SET status = "external_redirect" WHERE id = ?', (jid,))
                 conn.commit()
-                print(f"[NaukriBatch] -> External company site redirect (marked as external_redirect).")
+                print(f"[NaukriBatch] -> External company site redirect ({ext_url or url}).")
 
             elif status == "expired":
                 failed_count += 1

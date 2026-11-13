@@ -24,8 +24,22 @@ def process_redirects(max_jobs: int = 15):
     cur.execute('''
         SELECT id, title, company, url 
         FROM jobs 
-        WHERE status = 'external_redirect' 
-        ORDER BY created_at DESC 
+        WHERE (
+            status = 'external_redirect'
+            OR (
+                status = 'new'
+                AND url NOT LIKE '%naukri.com%'
+                AND url NOT LIKE '%linkedin.com%'
+                AND COALESCE(match_score, 80) >= 70
+            )
+        )
+        ORDER BY 
+            CASE 
+                WHEN url LIKE '%greenhouse.io%' THEN 0
+                WHEN url NOT LIKE '%indeed.com%' AND url NOT LIKE '%naukri.com%' THEN 1
+                ELSE 2
+            END ASC,
+            created_at DESC 
         LIMIT ?
     ''', (max_jobs,))
     jobs = cur.fetchall()

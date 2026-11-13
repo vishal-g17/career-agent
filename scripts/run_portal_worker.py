@@ -33,7 +33,13 @@ def get_pending_portal_counts():
     cur = conn.cursor()
     cur.execute("SELECT count(*) FROM jobs WHERE url LIKE '%naukri.com%' AND status = 'new'")
     naukri_pending = cur.fetchone()[0]
-    cur.execute("SELECT count(*) FROM jobs WHERE status = 'external_redirect'")
+    cur.execute(
+        """
+        SELECT count(*) FROM jobs
+        WHERE status = 'external_redirect'
+           OR (status = 'new' AND url NOT LIKE '%naukri.com%' AND url NOT LIKE '%linkedin.com%' AND COALESCE(match_score, 80) >= 70)
+        """
+    )
     redirects_pending = cur.fetchone()[0]
     cur.execute("SELECT count(*) FROM jobs WHERE status = 'applied'")
     total_applied = cur.fetchone()[0]
