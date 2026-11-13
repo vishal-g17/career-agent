@@ -25,6 +25,7 @@ class DiscordListener:
         self.client = DiscordClient()
         self.channel_id = channel_id or getattr(config, "DISCORD_PROMPT_CHANNEL_ID", "1570342549435187290")
         self.processed_msg_ids: Set[str] = set()
+        self.turn_history: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
 
     def send_chunked(self, target_channel: str, text: str) -> None:
@@ -120,8 +121,8 @@ class DiscordListener:
 
         return "\n".join(lines)
 
-    def ask_gemini_agent(self, prompt: str) -> str:
-        """Tool-enabled, memory-aware Gemini agent fallback when agy binary is not installed (e.g. on Linux VM)."""
+    def ask_gemini_agent(self, prompt: str, target_channel: str = None) -> str:
+        """CLI-grade tool-calling Gemini agent running 24/7 on Cloud VM (zero laptop dependency)."""
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key and os.path.exists(str(PROJECT_ROOT / ".env")):
             for line in open(str(PROJECT_ROOT / ".env")):
@@ -130,83 +131,96 @@ class DiscordListener:
         if not api_key:
             return "❌ Agent Error: No `GEMINI_API_KEY` configured in `.env`."
 
+        stop_typing = threading.Event()
+        if target_channel:
+            def _keep_typing():
+                while not stop_typing.is_set():
+                    try:
+                        self.client.trigger_typing(target_channel)
+                    except Exception:
+                        pass
+                    time.sleep(4)
+            threading.Thread(target=_keep_typing, daemon=True).start()
+
         is_mac = sys.platform == "darwin"
+        py_exec = sys.executable or "python3"
+        db_loc = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
         host_desc = (
-            "Local Mac (`/Users/admin/linkedin-multiagent`) connected to Ridealong (`127.0.0.1:9230`) + SSH access to OCI VM `opc@130.210.108.55` (`-i ~/Downloads/agent-vm-key.key`)."
+            f"Local Mac (`{WORKSPACE_DIR}`), Python `{py_exec}`, DB `{db_loc}`."
             if is_mac else
-            "Oracle Cloud VM (`130.210.108.55`, `/home/opc/career-agent`). Note: LinkedIn blocks OCI datacenter IPs with HTTP 403, so LinkedIn runs on Vishal's Mac Ridealong daemon while Portal ATS + Cold Email run 24/7 here on OCI."
+            f"24/7 Oracle Cloud VM (`130.210.108.55`, workspace `{WORKSPACE_DIR}`, Python `{py_exec}`, SQLite DB `{db_loc}`). "
+            "Systemd services here: `linkedin-email-worker.service` (24/7 Cold Email rotating `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com` via `src.services.cold_mailer.send_cold_email_smtp`), "
+            "`linkedin-portal-worker.service` (24/7 Naukri/Indeed/Greenhouse/Lever auto-apply), and `linkedin-discord-listener.service` (this #prompt CLI daemon). "
+            "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser tasks cannot run from the cloud IP without residential network access."
         )
         system_context = (
-            "You are Vishal Gupta's CLI-grade Career Automation Agent in Discord #prompt.\n"
-            f"Current execution host: {host_desc}\n"
-            "STRICT HONESTY & EXECUTION RULES:\n"
-            "1) You have a real shell tool `execute_shell_command`. Use it to inspect processes (`ps aux`), check SQLite DB (`~/.linkedin_agent.db`), read logs, or start/stop scripts.\n"
-            "2) NEVER hallucinate or roleplay fake execution logs! NEVER claim a message was sent, a job was applied to, or a worker started unless you actually ran `execute_shell_command` and verified the output.\n"
+            "You are Vishal Gupta's Autonomous CLI Agent running 24/7 in Discord #prompt with zero laptop dependency.\n"
+            f"Execution Host: {host_desc}\n"
+            "STRICT CLI EXECUTION & HONESTY RULES:\n"
+            f"1) Always use `execute_shell_command` (using `{py_exec}` for Python scripts/one-liners and `sqlite3 {db_loc}` for DB checks) whenever the user asks to send an email, check data/logs/processes, edit config, or start/stop/restart workers.\n"
+            "2) NEVER hallucinate or roleplay fake logs! NEVER claim an email was sent, a job was applied to, or a daemon started unless you actually ran `execute_shell_command` and verified the real stdout/stderr.\n"
             "3) NEVER mention past employer names under any circumstances.\n"
-            "4) Keep answers concise, factual, and CLI-accurate."
+            "4) Keep responses concise, factual, and formatted in clean Markdown."
         )
 
-        # Build real multi-turn chat history from recent Discord messages in #prompt
-        contents: List[Dict[str, Any]] = []
-        try:
-            recent_msgs = self.client.get_channel_messages(self.channel_id, limit=8)
-            for m in reversed(recent_msgs):
-                c_txt = (m.get("content") or "").strip()
-                if not c_txt or c_txt == prompt.strip():
-                    continue
-                is_bot = bool((m.get("author") or {}).get("bot"))
-                role = "model" if is_bot else "user"
-                if contents and contents[-1]["role"] == role:
-                    contents[-1]["parts"][0]["text"] += "\n" + c_txt[:1000]
-                else:
-                    contents.append({"role": role, "parts": [{"text": c_txt[:1000]}]})
-        except Exception:
-            pass
-        if contents and contents[0]["role"] == "model":
-            contents = contents[1:]
+        contents: List[Dict[str, Any]] = list(self.turn_history[-12:])
         contents.append({"role": "user", "parts": [{"text": prompt}]})
 
         tools_spec = [{
             "functionDeclarations": [{
                 "name": "execute_shell_command",
-                "description": "Execute a bash command in the career-agent workspace and return real stdout/stderr.",
+                "description": "Execute a real bash command in WORKSPACE_DIR on this server and return stdout/stderr.",
                 "parameters": {
                     "type": "OBJECT",
                     "properties": {
-                        "command": {"type": "STRING", "description": "Shell command to run"}
+                        "command": {"type": "STRING", "description": "Exact bash command to execute"}
                     },
                     "required": ["command"]
                 }
             }]
         }]
 
-        model_name = "gemini-2.5-flash"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+        active_model_idx = 0
 
-        for _ in range(4):
-            payload = {
-                "systemInstruction": {"parts": [{"text": system_context}]},
-                "contents": contents,
-                "tools": tools_spec,
-                "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.2}
-            }
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-            try:
-                resp = urllib.request.urlopen(req, timeout=45)
-                res_json = json.loads(resp.read().decode())
+        try:
+            for _ in range(8):
+                model_name = models_to_try[active_model_idx]
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                payload = {
+                    "systemInstruction": {"parts": [{"text": system_context}]},
+                    "contents": contents,
+                    "tools": tools_spec,
+                    "generationConfig": {"maxOutputTokens": 1200, "temperature": 0.2}
+                }
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                try:
+                    resp = urllib.request.urlopen(req, timeout=50)
+                    res_json = json.loads(resp.read().decode())
+                except Exception as api_err:
+                    if active_model_idx + 1 < len(models_to_try):
+                        active_model_idx += 1
+                        continue
+                    return f"❌ AI Tool-Agent Error: `{api_err}`"
+
                 cand_content = res_json["candidates"][0]["content"]
                 parts = cand_content.get("parts", [])
                 fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
                 if not fn_calls:
                     text_parts = [p.get("text", "") for p in parts if "text" in p]
-                    return "\n".join(text_parts).strip() or "✅ Done."
+                    final_reply = "\n".join(text_parts).strip() or "✅ Done."
+                    self.turn_history.append({"role": "user", "parts": [{"text": prompt[:1000]}]})
+                    self.turn_history.append({"role": "model", "parts": [{"text": final_reply[:1200]}]})
+                    if len(self.turn_history) > 16:
+                        self.turn_history = self.turn_history[-16:]
+                    return final_reply
 
                 contents.append(cand_content)
                 fn_responses = []
                 for fc in fn_calls:
                     cmd_str = (fc.get("args") or {}).get("command", "")
-                    print(f"[DiscordCLI:GeminiTool] Running: {cmd_str}")
+                    print(f"[DiscordCLI:CloudTool] Executing: {cmd_str}")
                     tool_out = self.execute_bash_direct(cmd_str)
                     fn_responses.append({
                         "functionResponse": {
@@ -215,20 +229,18 @@ class DiscordListener:
                         }
                     })
                 contents.append({"role": "user", "parts": fn_responses})
-            except Exception as e:
-                return f"❌ AI Tool-Agent Error: `{e}`"
-
-        return "⚠️ Completed tool steps; check `!sh ps aux` or `status` for latest state."
+            return "⚠️ Completed 8 tool steps; run `status` or `!sh ps aux` to inspect state."
+        finally:
+            stop_typing.set()
 
     def run_antigravity_cli_turn(self, prompt: str, target_channel: str, msg_id: str) -> str:
         """
-        Executes the prompt through the Antigravity (AGY) CLI engine in an isolated persistent
-        session directory (~/.discord_agy_workspace) so it never collides with open TUI sessions,
-        or falls back to the tool-enabled Gemini agent when agy is unavailable.
+        Executes the prompt through the Antigravity (AGY) CLI engine if installed,
+        or runs the 24/7 Cloud VM tool-calling CLI agent when running on Linux VM.
         """
         if not shutil.which(AGY_BIN) and not os.path.exists(AGY_BIN):
-            print(f"[DiscordCLI:AGY] AGY binary not found at '{AGY_BIN}'. Routing to tool-enabled Gemini agent...")
-            return self.ask_gemini_agent(prompt)
+            print(f"[DiscordCLI] Running 24/7 Cloud CLI Tool-Agent for prompt: {prompt}")
+            return self.ask_gemini_agent(prompt, target_channel=target_channel)
 
         print(f"[DiscordCLI:AGY] Dispatching turn to Antigravity CLI: {prompt}")
 
