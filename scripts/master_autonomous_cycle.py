@@ -607,18 +607,16 @@ def sync_new_outreach_leads_to_cloud_vm(conn) -> int:
         rows = cur.fetchall()
         if not rows:
             return 0
-        import json
-        payload_json = json.dumps(rows)
+        import json, base64
+        b64_payload = base64.b64encode(json.dumps(rows).encode("utf-8")).decode("ascii")
         remote_py = (
-            "import sys, json, sqlite3; "
-            "rows = json.loads(sys.stdin.read()); "
-            "conn = sqlite3.connect('/home/opc/.linkedin_agent.db'); "
-            "c = conn.cursor(); "
-            "before = conn.total_changes; "
+            "import base64, json, sqlite3; "
+            f"rows = json.loads(base64.b64decode(\"{b64_payload}\").decode()); "
+            "conn = sqlite3.connect(\"/home/opc/.linkedin_agent.db\"); "
+            "c = conn.cursor(); before = conn.total_changes; "
             "c.executemany(\"INSERT OR IGNORE INTO outreach_leads (name, email, company, role_target, status, created_at) "
-            "VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)\", rows); "
-            "added = conn.total_changes - before; "
-            "conn.commit(); conn.close(); print(added)"
+            "VALUES (?, ?, ?, ?, \\x27pending\\x27, CURRENT_TIMESTAMP)\", rows); "
+            "added = conn.total_changes - before; conn.commit(); conn.close(); print(added)"
         )
         proc = subprocess.run(
             [
@@ -627,7 +625,7 @@ def sync_new_outreach_leads_to_cloud_vm(conn) -> int:
                 "opc@130.210.108.55",
                 f"/home/opc/career-agent/venv/bin/python3 -c '{remote_py}'"
             ],
-            input=payload_json, capture_output=True, text=True, timeout=15
+            capture_output=True, text=True, timeout=15
         )
         added_remote = int((proc.stdout or "0").strip() or "0")
         if added_remote > 0:

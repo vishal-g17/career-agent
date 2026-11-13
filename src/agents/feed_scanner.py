@@ -287,6 +287,13 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
     total_emails = sum(len(l["emails"]) for l in all_leads)
     total_forms = sum(len(l["forms"]) for l in all_leads)
     print(f"\n[FeedScanner] Total Finished: {len(all_leads)} posts analyzed | {total_emails} post-body emails extracted & queued | {total_forms} forms found.")
+    try:
+        from scripts.master_autonomous_cycle import sync_new_outreach_leads_to_cloud_vm
+        conn_sync = sqlite3.connect(DB_PATH)
+        sync_new_outreach_leads_to_cloud_vm(conn_sync)
+        conn_sync.close()
+    except Exception:
+        pass
     return all_leads
 
 # Alias for backwards compatibility with master_autonomous_cycle
