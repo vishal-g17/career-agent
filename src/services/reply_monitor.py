@@ -1,30 +1,33 @@
+from concurrent.futures import ThreadPoolExecutor
 import email
 from email.header import decode_header
 import imaplib
 import os
 import re
+import sqlite3
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Set
 
 from .. import config
 from ..agents.discord_notifier import DiscordNotifier
 from ..db import database
-from .exclusion_filter import record_bounced_email
+from .exclusion_filter import ensure_blocklist_table
 
 EMAIL_TOKEN_RE = re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+")
 
-BOUNCE_SEARCH_CRITERIA = [
-    'FROM "mailer-daemon"',
-    'FROM "postmaster"',
-    'SUBJECT "Delivery Status Notification"',
-    'SUBJECT "Undelivered Mail"',
-    'SUBJECT "Undeliverable"',
-    'SUBJECT "Mail delivery failed"',
-    'SUBJECT "Address not found"',
-    'SUBJECT "Message not delivered"',
-    'SUBJECT "Returned mail"',
-    'SUBJECT "Failure Notice"',
-]
+# Single combined OR search in Gmail IMAP X-GM-RAW for 1-roundtrip instant detection
+GMAIL_BOUNCE_RAW_QUERY = (
+    'X-GM-RAW "from:mailer-daemon OR from:postmaster '
+    'OR subject:\\"Delivery Status Notification\\" '
+    'OR subject:\\"Address not found\\" '
+    'OR subject:\\"Message not delivered\\" '
+    'OR subject:\\"Undelivered Mail\\" '
+    'OR subject:\\"Undeliverable\\" '
+    'OR subject:\\"Mail delivery failed\\" '
+    'OR subject:\\"Failure Notice\\" '
+    'OR subject:\\"Returned mail\\""'
+)
 
 BOUNCE_PATTERNS = [
     re.compile(r"X-Failed-Recipients:\s*([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)", re.IGNORECASE),
@@ -81,7 +84,7 @@ def _is_system_or_self_address(addr: str, self_emails: Set[str]) -> bool:
     return False
 
 
-def _extract_bounced_recipients(raw_bytes: bytes, self_emails: Set[str], known_db_emails: Set[str]) -> Set[str]:
+def _extract_bounced_recipients_fast(raw_bytes: bytes, self_emails: Set[str], known_db_emails: Set[str]) -> Set[str]:
     found: Set[str] = set()
     decoded_chunks: List[str] = []
 
@@ -95,16 +98,6 @@ def _extract_bounced_recipients(raw_bytes: bytes, self_emails: Set[str], known_d
                         found.add(cand)
 
         for part in msg.walk():
-            ctype = (part.get_content_type() or "").lower()
-            if ctype == "message/rfc822":
-                payload = part.get_payload()
-                if isinstance(payload, list):
-                    for sub in payload:
-                        to_hdr = sub.get("To", "")
-                        for m in EMAIL_TOKEN_RE.findall(str(to_hdr)):
-                            cand = m.lower().strip(".,;<>")
-                            if not _is_system_or_self_address(cand, self_emails):
-                                found.add(cand)
             raw_part = part.get_payload(decode=True)
             if isinstance(raw_part, bytes):
                 decoded_chunks.append(raw_part.decode(part.get_content_charset() or "utf-8", errors="ignore"))
@@ -122,8 +115,8 @@ def _extract_bounced_recipients(raw_bytes: bytes, self_emails: Set[str], known_d
             if not _is_system_or_self_address(cand, self_emails):
                 found.add(cand)
 
-    # Fallback: intersect all email tokens in the bounce body with known outreach_leads emails
-    if not found and known_db_emails:
+    # Also match any known outreach_leads address mentioned inside the bounce snippet
+    if known_db_emails:
         for m in EMAIL_TOKEN_RE.findall(combined):
             cand = m.lower().strip(".,;<>")
             if cand in known_db_emails and not _is_system_or_self_address(cand, self_emails):
@@ -132,15 +125,42 @@ def _extract_bounced_recipients(raw_bytes: bytes, self_emails: Set[str], known_d
     return found
 
 
-def sweep_account_bounces(user_email: str, app_password: str, account_label: str = "") -> Dict[str, Any]:
+def _bulk_purge_bounced_from_db(emails: Set[str], source_label: str) -> int:
+    if not emails:
+        return 0
+    clean_list = sorted({e.strip().lower() for e in emails if e and "@" in e})
+    if not clean_list:
+        return 0
+    db_file = Path(os.environ.get("DATABASE_PATH", str(Path.home() / ".linkedin_agent.db")))
+    deleted_total = 0
+    try:
+        conn = sqlite3.connect(str(db_file), timeout=45.0)
+        ensure_blocklist_table(conn)
+        conn.executemany(
+            "INSERT OR REPLACE INTO bounced_blocklist (email, reason, detected_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            [(em, f"IMAP Bounce ({source_label})") for em in clean_list],
+        )
+        for em in clean_list:
+            cur = conn.execute("DELETE FROM outreach_leads WHERE LOWER(TRIM(email)) = ?", (em,))
+            deleted_total += cur.rowcount
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[BounceMonitor] DB purge error: {e}")
+    return deleted_total
+
+
+def sweep_account_bounces(user_email: str, app_password: str, account_label: str = "", purge_trash: bool = True) -> Dict[str, Any]:
     """
-    Sweeps an IMAP inbox via UID for ANY bounce/NDR messages, extracts failed recipients,
-    deletes those contacts from outreach_leads (while recording in bounced_blocklist),
-    and deletes the bounce messages from the inbox immediately.
+    Ultra-fast pipelined IMAP UID bounce sweeper:
+      1. Finds all bounce UIDs in 1 single X-GM-RAW IMAP query.
+      2. Fetches ONLY first 16 KB (BODY.PEEK[]<0.16384>) in batches of 100 UIDs (~0.3s/100 mails, skipping attachments!).
+      3. Immediately deletes those bounce mails from INBOX AND permanently expunges them from Trash/Bin.
+      4. Bulk-deletes every bounced recipient from outreach_leads (and records in internal bounced_blocklist).
     """
     clean_pwd = (app_password or "").replace(" ", "").strip()
     if not user_email or not clean_pwd:
-        return {"inbox_deleted": 0, "db_deleted": 0, "bounced_emails": []}
+        return {"inbox_deleted": 0, "trash_deleted": 0, "db_deleted": 0, "bounced_emails": []}
 
     self_emails = {
         user_email.strip().lower(),
@@ -149,6 +169,7 @@ def sweep_account_bounces(user_email: str, app_password: str, account_label: str
     }
 
     inbox_deleted = 0
+    trash_deleted = 0
     db_deleted = 0
     all_bounced_emails: Set[str] = set()
 
@@ -166,50 +187,63 @@ def sweep_account_bounces(user_email: str, app_password: str, account_label: str
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=25)
         mail.login(user_email, clean_pwd)
         trash_folder = _detect_trash_folder(mail, user_email)
+
+        # --- STEP A: Sweep INBOX in pipelined 100-UID chunks ---
         mail.select("INBOX", readonly=False)
+        res, data = mail.uid("search", None, GMAIL_BOUNCE_RAW_QUERY)
+        if res != "OK":
+            # Fallback if X-GM-RAW unsupported
+            res, data = mail.uid("search", None, '(OR FROM "mailer-daemon" FROM "postmaster")')
 
-        matching_uids: Set[bytes] = set()
-        for crit in BOUNCE_SEARCH_CRITERIA:
-            try:
-                res, data = mail.uid("search", None, f"({crit})")
-                if res == "OK" and data and data[0]:
-                    matching_uids.update(data[0].split())
-            except Exception:
-                continue
-
-        if matching_uids:
-            uid_list = sorted(matching_uids, key=lambda u: int(u) if u.isdigit() else 0)
-            for uid in uid_list:
-                try:
-                    res, fdata = mail.uid("fetch", uid, "(RFC822)")
-                    if res == "OK" and fdata:
-                        for item in fdata:
-                            if isinstance(item, tuple) and isinstance(item[1], bytes):
-                                extracted = _extract_bounced_recipients(item[1], self_emails, known_db_emails)
-                                for b_em in extracted:
-                                    all_bounced_emails.add(b_em)
-                                    if record_bounced_email(b_em, f"IMAP Bounce ({user_email})"):
-                                        db_deleted += 1
-                except Exception as fe:
-                    print(f"[BounceMonitor] Warning fetching UID {uid} on {user_email}: {fe}")
-
-            # Batch copy to Trash + mark \Deleted + EXPUNGE so inbox stays 100% bounce-free
-            batch_size = 200
+        uid_list = data[0].split() if (res == "OK" and data and data[0]) else []
+        if uid_list:
+            batch_size = 100
             for i in range(0, len(uid_list), batch_size):
                 batch = uid_list[i : i + batch_size]
                 uid_str = b",".join(batch).decode("utf-8")
+                batch_bounced: Set[str] = set()
+
+                # Pipelined partial fetch (first 16KB only -> skips heavy PDF attachments!)
+                fres, fdata = mail.uid("fetch", uid_str, "(BODY.PEEK[]<0.16384>)")
+                if fres == "OK" and fdata:
+                    for item in fdata:
+                        if isinstance(item, tuple) and isinstance(item[1], bytes):
+                            batch_bounced.update(_extract_bounced_recipients_fast(item[1], self_emails, known_db_emails))
+
+                if batch_bounced:
+                    all_bounced_emails.update(batch_bounced)
+                    db_deleted += _bulk_purge_bounced_from_db(batch_bounced, account_label or user_email)
+
+                # Immediately move to Trash + mark \Deleted + EXPUNGE right inside this batch!
                 try:
                     mail.uid("copy", uid_str, f'"{trash_folder}"')
                 except Exception:
                     pass
-                mail.uid("store", uid_str, "+FLAGS", "(\\Deleted)")
+                mail.uid("store", uid_str, "+FLAGS.SILENT", "(\\Deleted)")
+                mail.expunge()
                 inbox_deleted += len(batch)
 
-            mail.expunge()
+        # --- STEP B: Permanently delete bounce mails from Trash/Bin too so they are 100% gone ---
+        if purge_trash and trash_folder:
+            sel_res, _ = mail.select(f'"{trash_folder}"', readonly=False)
+            if sel_res == "OK":
+                tres, tdata = mail.uid("search", None, GMAIL_BOUNCE_RAW_QUERY)
+                if tres != "OK":
+                    tres, tdata = mail.uid("search", None, '(OR FROM "mailer-daemon" FROM "postmaster")')
+                tuids = tdata[0].split() if (tres == "OK" and tdata and tdata[0]) else []
+                if tuids:
+                    for i in range(0, len(tuids), 200):
+                        tbatch = tuids[i : i + 200]
+                        tuid_str = b",".join(tbatch).decode("utf-8")
+                        mail.uid("store", tuid_str, "+FLAGS.SILENT", "(\\Deleted)")
+                        trash_deleted += len(tbatch)
+                    mail.expunge()
+
+        if inbox_deleted or trash_deleted or db_deleted:
             print(
-                f"[BounceMonitor:{account_label or user_email}] Deleted {inbox_deleted} bounce mail(s) from INBOX; "
-                f"extracted {len(all_bounced_emails)} bounced address(es) ({sorted(all_bounced_emails)}); "
-                f"removed {db_deleted} row(s) from outreach_leads."
+                f"[BounceMonitor:{account_label or user_email}] INSTANT WIPE -> "
+                f"INBOX deleted: {inbox_deleted}, Trash permanently wiped: {trash_deleted}, "
+                f"DB leads deleted: {db_deleted} (addresses={len(all_bounced_emails)})."
             )
 
         mail.close()
@@ -219,6 +253,7 @@ def sweep_account_bounces(user_email: str, app_password: str, account_label: str
 
     return {
         "inbox_deleted": inbox_deleted,
+        "trash_deleted": trash_deleted,
         "db_deleted": db_deleted,
         "bounced_emails": sorted(all_bounced_emails),
     }
@@ -226,40 +261,42 @@ def sweep_account_bounces(user_email: str, app_password: str, account_label: str
 
 def sweep_all_inboxes_for_bounces() -> Dict[str, Any]:
     """
-    Sweeps BOTH NSUT Workspace and Personal Gmail inboxes for bounce messages,
-    deletes them from the inboxes, and deletes the bounced contacts from outreach_leads.
+    Sweeps BOTH NSUT Workspace and Personal Gmail SIMULTANEOUSLY in parallel threads.
     """
     college_addr = getattr(config, "COLLEGE_EMAIL_ADDRESS", os.environ.get("COLLEGE_EMAIL_ADDRESS", "vishal.gupta.ug22@nsut.ac.in"))
     college_pwd = getattr(config, "COLLEGE_EMAIL_APP_PASSWORD", os.environ.get("COLLEGE_EMAIL_APP_PASSWORD", ""))
     gmail_addr = getattr(config, "GMAIL_ADDRESS", os.environ.get("GMAIL_ADDRESS", "vishal90301@gmail.com"))
     gmail_pwd = getattr(config, "GMAIL_APP_PASSWORD", os.environ.get("GMAIL_APP_PASSWORD", ""))
 
-    r1 = sweep_account_bounces(college_addr, college_pwd, "NSUT Workspace") if college_pwd else {"inbox_deleted": 0, "db_deleted": 0, "bounced_emails": []}
-    r2 = sweep_account_bounces(gmail_addr, gmail_pwd, "Personal Gmail") if gmail_pwd else {"inbox_deleted": 0, "db_deleted": 0, "bounced_emails": []}
+    tasks = []
+    if college_pwd:
+        tasks.append((college_addr, college_pwd, "NSUT Workspace"))
+    if gmail_pwd:
+        tasks.append((gmail_addr, gmail_pwd, "Personal Gmail"))
+
+    if not tasks:
+        return {"inbox_deleted": 0, "trash_deleted": 0, "db_deleted": 0, "bounced_emails": []}
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        results = list(pool.map(lambda t: sweep_account_bounces(t[0], t[1], t[2]), tasks))
 
     return {
-        "inbox_deleted": r1["inbox_deleted"] + r2["inbox_deleted"],
-        "db_deleted": r1["db_deleted"] + r2["db_deleted"],
-        "bounced_emails": sorted(set(r1["bounced_emails"]) | set(r2["bounced_emails"])),
+        "inbox_deleted": sum(r["inbox_deleted"] for r in results),
+        "trash_deleted": sum(r.get("trash_deleted", 0) for r in results),
+        "db_deleted": sum(r["db_deleted"] for r in results),
+        "bounced_emails": sorted({em for r in results for em in r["bounced_emails"]}),
     }
 
 
 def process_and_clean_bounces(mail: imaplib.IMAP4_SSL, user_email: str) -> List[str]:
-    # Retained for backwards compatibility if called directly with an open IMAP session
     return []
 
 
 def check_account_replies(user_email: str, app_password: str, account_label: str) -> List[Dict[str, Any]]:
-    """
-    Checks a single IMAP inbox for incoming recruiter replies (after sweeping bounces).
-    """
     detected = []
     clean_pwd = (app_password or "").replace(" ", "").strip()
     if not clean_pwd:
         return []
-
-    # 1. Sweep & delete bounces first
-    sweep_account_bounces(user_email, clean_pwd, account_label)
 
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", 993, timeout=20)
@@ -287,7 +324,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
         notifier = DiscordNotifier()
         message_ids = msg_nums[0].split()
 
-        for m_id in reversed(message_ids[-40:]):
+        for m_id in reversed(message_ids[-35:]):
             res, data = mail.fetch(m_id, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
             if res != "OK" or not data or not data[0]:
                 continue

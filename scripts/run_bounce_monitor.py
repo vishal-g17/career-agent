@@ -1,5 +1,6 @@
 import sqlite3
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -8,6 +9,22 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.sync_leads_to_sheet import DB_PATH, export_split_leads
 from src.services.reply_monitor import check_gmail_replies, sweep_all_inboxes_for_bounces
+
+_sheet_lock = threading.Lock()
+
+
+def _trigger_sheet_refresh_async():
+    if _sheet_lock.locked():
+        return
+
+    def _worker():
+        with _sheet_lock:
+            try:
+                export_split_leads()
+            except Exception as e:
+                print(f"[BounceMonitor:SheetSyncWarn] {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _get_blocklist_and_lead_counts():
@@ -31,19 +48,18 @@ def _get_blocklist_and_lead_counts():
         return 0, 0, 0
 
 
-def run_continuous_bounce_monitor(poll_seconds: int = 25):
+def run_continuous_bounce_monitor(poll_seconds: int = 6):
     print("=" * 72)
-    print("🧹 24/7 BOUNCE & REPLY MONITOR ACTIVE (NSUT + Gmail IMAP + DB/Sheet Purge)")
-    print(f"Polling every {poll_seconds}s | Auto-deletes bounce emails + purges DB & sheets")
+    print("⚡ INSTANT 24/7 BOUNCE DELETER ACTIVE (NSUT + Gmail Parallel IMAP)")
+    print(f"Polling every {poll_seconds}s | Pipelined 16KB fetch + instant INBOX & Trash wipe + DB/Sheet delete")
     print("=" * 72)
 
-    # Initial cleanup & sheet sync on boot
     init_res = sweep_all_inboxes_for_bounces()
     export_split_leads()
     last_blk, last_tot, last_sent = _get_blocklist_and_lead_counts()
     print(
-        f"[BounceMonitor:Init] Wiped {init_res['inbox_deleted']} inbox bounce(s), "
-        f"active leads={last_tot} (sent={last_sent}), blocked={last_blk}."
+        f"[BounceMonitor:Init] Wiped {init_res['inbox_deleted']} INBOX bounce(s) + {init_res.get('trash_deleted', 0)} Trash bounce(s), "
+        f"active leads={last_tot} (sent={last_sent}), total purged bounces={last_blk}."
     )
 
     cycle = 0
@@ -55,24 +71,20 @@ def run_continuous_bounce_monitor(poll_seconds: int = 25):
             res = sweep_all_inboxes_for_bounces()
             cur_blk, cur_tot, cur_sent = _get_blocklist_and_lead_counts()
 
-            # Regenerate sheets immediately if any bounce was deleted OR every 8th pass (~3m) if sent count moved
             bounced_changed = (res["db_deleted"] > 0) or (cur_blk != last_blk) or (cur_tot < last_tot)
-            periodic_sent_refresh = (cycle % 8 == 0) and (cur_sent != last_sent)
+            periodic_sent_refresh = (cycle % 20 == 0) and (cur_sent != last_sent)
 
             if bounced_changed or periodic_sent_refresh:
-                export_split_leads()
-                last_blk, last_tot, last_sent = _get_blocklist_and_lead_counts()
+                last_blk, last_tot, last_sent = cur_blk, cur_tot, cur_sent
+                _trigger_sheet_refresh_async()
 
-            # Also check for genuine recruiter replies every 4th pass (~100s)
-            if cycle % 4 == 0:
-                replies = check_gmail_replies()
-                if replies:
-                    export_split_leads()
-                    last_blk, last_tot, last_sent = _get_blocklist_and_lead_counts()
+            # Check for genuine recruiter replies every ~2 minutes (every 20th 6s pass)
+            if cycle % 20 == 0:
+                threading.Thread(target=check_gmail_replies, daemon=True).start()
         except Exception as e:
             print(f"[BounceMonitor:Error] {e}")
-            time.sleep(15)
+            time.sleep(6)
 
 
 if __name__ == "__main__":
-    run_continuous_bounce_monitor(poll_seconds=25)
+    run_continuous_bounce_monitor(poll_seconds=6)

@@ -137,12 +137,13 @@ def export_split_leads():
     for idx, width in enumerate(col_widths_active, start=1):
         ws_active.column_dimensions[get_column_letter(idx)].width = width
 
-    tmp_xlsx = OUTPUT_DIR / ".MASTER_LEADS_SHEET.tmp.xlsx"
+    pid = os.getpid()
+    tmp_xlsx = OUTPUT_DIR / f".MASTER_LEADS_SHEET.{pid}.tmp.xlsx"
     wb.save(tmp_xlsx)
     os.replace(tmp_xlsx, OUTPUT_XLSX)
 
     # 2. ACTIVE_DELIVERED_LEADS.csv
-    tmp_active_csv = OUTPUT_DIR / ".ACTIVE_DELIVERED_LEADS.tmp.csv"
+    tmp_active_csv = OUTPUT_DIR / f".ACTIVE_DELIVERED_LEADS.{pid}.tmp.csv"
     with open(tmp_active_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(headers_active)
@@ -174,7 +175,7 @@ def export_split_leads():
         "Reply Snippet",
         "Reply Date",
     ]
-    tmp_w_csv = OUTPUT_DIR / ".WORKING_LEADS_MASTER.tmp.csv"
+    tmp_w_csv = OUTPUT_DIR / f".WORKING_LEADS_MASTER.{pid}.tmp.csv"
     with open(tmp_w_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(working_headers)
@@ -208,7 +209,7 @@ def export_split_leads():
             r.get("reply_snippet") or "",
             r.get("reply_received_at") or "",
         ])
-    tmp_w_xlsx = OUTPUT_DIR / ".WORKING_LEADS_MASTER.tmp.xlsx"
+    tmp_w_xlsx = OUTPUT_DIR / f".WORKING_LEADS_MASTER.{pid}.tmp.xlsx"
     wb_work.save(tmp_w_xlsx)
     os.replace(tmp_w_xlsx, OUTPUT_WORKING_XLSX)
 
@@ -223,7 +224,7 @@ def export_split_leads():
         }
         for r in active_rows
     ]
-    tmp_json = OUTPUT_DIR / ".cleaned_recruiter_leads.tmp.json"
+    tmp_json = OUTPUT_DIR / f".cleaned_recruiter_leads.{pid}.tmp.json"
     with open(tmp_json, "w", encoding="utf-8") as jf:
         json.dump(json_leads, jf, indent=2, ensure_ascii=False)
     os.replace(tmp_json, OUTPUT_CLEAN_JSON)
