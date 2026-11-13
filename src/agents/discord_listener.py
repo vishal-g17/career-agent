@@ -245,8 +245,11 @@ class DiscordListener:
             "`linkedin-dashboard.service` + `linkedin-dashboard-tunnel.service` "
             f"(Live Master Sheet: `{live_base}/sheet`, Clean Excel Download: `{live_base}/download/MASTER_LEADS_SHEET.xlsx`, Clean CSV: `{live_base}/download/ACTIVE_DELIVERED_LEADS.csv`, Dashboard: `{live_base}/p/dashboard`), "
             "and `linkedin-discord-listener.service` (this Discord CLI daemon). "
-            "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser clicks execute over Vishal's residential IP while controlled from HERE via `src.services.linkedin_control` (`/home/opc/.linkedin_control.json`). "
-            f"To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} -m src.services.linkedin_control stop` or `start` or `status`!"
+            "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser clicks execute over Vishal's residential Mac Ridealong session (`run_mac_linkedin_bridge.py` + `master_autonomous_cycle.py`) while controlled from HERE!\n"
+            f"• To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} -m src.services.linkedin_control stop` or `start` or `status`.\n"
+            f"• IMPORTANT — ON-DEMAND LINKEDIN MESSAGE / CONNECT TO A PERSON: Whenever the user asks to send a LinkedIn message or connect with a specific person (e.g. 'Send linkedin msg to Shivani Gupta working at CARS24 as Associate'), DO NOT waste steps searching SQLite tables on this VM (LinkedIn connections live on the Mac)! Immediately run ONE command:\n"
+            f"  `{py_exec} -m src.services.linkedin_adhoc_bridge enqueue --query \"<full search query>\" --name \"<person name>\" --company \"<company>\" --role \"<role>\" --channel \"{target_channel or self.channel_id}\"`\n"
+            "  The Local Mac Ridealong bridge polls this queue every 6 seconds, searches LinkedIn, sends the verified pitch + CV PDF (or Connection Request if 2nd-degree), and posts the real confirmation receipt right back into this Discord channel!"
         )
         system_context = (
             "You are Vishal Gupta's Autonomous CLI Agent running 24/7 in Discord #prompt with zero laptop dependency.\n"
@@ -279,15 +282,23 @@ class DiscordListener:
         active_model_idx = 0
 
         try:
-            for _ in range(8):
+            max_steps = 12
+            for step_idx in range(max_steps + 1):
+                is_final_summary = step_idx == max_steps
                 model_name = models_to_try[active_model_idx]
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+                if is_final_summary:
+                    contents.append({
+                        "role": "user",
+                        "parts": [{"text": "Now provide a clear, concise final summary of what you found and executed so far (no more tool calls)."}]
+                    })
                 payload = {
                     "systemInstruction": {"parts": [{"text": system_context}]},
                     "contents": contents,
-                    "tools": tools_spec,
                     "generationConfig": {"maxOutputTokens": 1200, "temperature": 0.2}
                 }
+                if not is_final_summary:
+                    payload["tools"] = tools_spec
                 data = json.dumps(payload).encode("utf-8")
                 req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
                 try:
@@ -302,7 +313,7 @@ class DiscordListener:
                 cand_content = res_json["candidates"][0]["content"]
                 parts = cand_content.get("parts", [])
                 fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
-                if not fn_calls:
+                if not fn_calls or is_final_summary:
                     text_parts = [p.get("text", "") for p in parts if "text" in p]
                     final_reply = "\n".join(text_parts).strip() or "✅ Done."
                     self.turn_history.append({"role": "user", "parts": [{"text": prompt[:1000]}]})
@@ -325,7 +336,7 @@ class DiscordListener:
                         fn_resp_obj["id"] = fc["id"]
                     fn_responses.append({"functionResponse": fn_resp_obj})
                 contents.append({"role": "user", "parts": fn_responses})
-            return "⚠️ Completed 8 tool steps; run `status` or `!sh ps aux` to inspect state."
+            return "✅ Completed execution."
         finally:
             stop_typing.set()
 
