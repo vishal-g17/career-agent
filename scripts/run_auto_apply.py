@@ -53,25 +53,25 @@ def main():
         res = apply_to_easy_apply_job(url, role_title=title, auto_submit=True)
         
         with database.get_connection() as conn_update:
-            if res.get("is_easy_apply") and res.get("submitted"):
+            if res.get("is_easy_apply") and res.get("submitted") and res.get("confirmed"):
                 conn_update.execute("UPDATE jobs SET status = 'applied' WHERE id = ?", (job_id,))
                 applied_count += 1
-                status_note = "✅ Submitted via LinkedIn Easy Apply"
+                status_note = "✅ Submitted & Confirmed via LinkedIn Easy Apply"
             elif res.get("is_easy_apply"):
                 conn_update.execute("UPDATE jobs SET status = 'reviewed' WHERE id = ?", (job_id,))
-                status_note = "⚠️ Reviewed (requires custom manual review)"
+                status_note = f"⚠️ Reviewed / Unconfirmed ({res.get('error') or 'requires custom manual review'})"
             else:
                 # External redirect: Automatically fill application on company career site!
                 print(f"[AutoApply] External role detected for {title} @ {comp}. Launching ATS autofill...")
                 ats_res = fill_ats_application(url, role_title=title, auto_submit=True)
-                if ats_res.get("submitted") or ats_res.get("resume_uploaded") or len(ats_res.get("fields_filled", [])) >= 2:
+                if ats_res.get("submitted") and ats_res.get("confirmed"):
                     conn_update.execute("UPDATE jobs SET status = 'applied' WHERE id = ?", (job_id,))
                     applied_count += 1
-                    status_note = f"✅ Submitted via External ATS ({ats_res.get('ats_type', 'Company Portal').upper()})"
+                    status_note = f"✅ Submitted & Confirmed via External ATS ({ats_res.get('ats_type', 'Company Portal').upper()})"
                 else:
                     conn_update.execute("UPDATE jobs SET status = 'external_redirect' WHERE id = ?", (job_id,))
                     external_count += 1
-                    status_note = f"🔗 External Career Site ({ats_res.get('ats_type', 'ATS')}) - Stored in queue"
+                    status_note = f"🔗 External Career Site ({ats_res.get('ats_type', 'ATS')}) - Stored in queue (not auto-confirmed)"
 
         # Notify Discord of individual application
         client.send_message(

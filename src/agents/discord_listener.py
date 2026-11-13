@@ -232,6 +232,46 @@ class DiscordListener:
             self.client.add_reaction(target_channel, msg_id, "✅")
             return
 
+        # 1b. Fast path: 1-Task-at-a-Time Verified LinkedIn Automation (!linkedin_run ...)
+        if lower.startswith("!linkedin_run") or lower.startswith("!li "):
+            parts = text.split()
+            sub_action = parts[1].lower() if len(parts) >= 2 else "check"
+            target_arg = parts[2].strip("<>") if len(parts) >= 3 else ""
+            py_bin = sys.executable or "python3"
+            script_path = str(PROJECT_ROOT / "scripts" / "linkedin_single_task.py")
+            if sub_action in ("check", "status"):
+                cmd_list = [py_bin, script_path, "check"]
+            elif sub_action == "next":
+                cmd_list = [py_bin, script_path, "next"]
+            elif sub_action == "apply":
+                cmd_list = [py_bin, script_path, "apply", target_arg or "next"]
+            else:
+                # Allow `!linkedin_run https://www.linkedin.com/jobs/view/...` directly
+                if sub_action.startswith("http"):
+                    cmd_list = [py_bin, script_path, "apply", parts[1].strip("<>")]
+                else:
+                    self.send_chunked(
+                        target_channel,
+                        "ℹ️ **1-Task LinkedIn Commands:**\n"
+                        "• `!linkedin_run check` — Verify LinkedIn session & view top queued roles\n"
+                        "• `!linkedin_run next` — Execute 1 verified Easy Apply task from top of queue\n"
+                        "• `!linkedin_run apply <linkedin_job_url>` — Apply to 1 specific job URL with strict receipt check"
+                    )
+                    self.client.add_reaction(target_channel, msg_id, "✅")
+                    return
+
+            try:
+                proc = subprocess.run(cmd_list, cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=150)
+                out = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "Completed with no output."
+                # Extract clean summary lines (skip verbose [EasyApply] debug prints if summary present)
+                summary_lines = [ln for ln in out.splitlines() if not ln.startswith("[EasyApply]") and not ln.startswith("[ATSFiller]")]
+                clean_out = "\n".join(summary_lines).strip() or out
+                self.send_chunked(target_channel, clean_out[:1900])
+                self.client.add_reaction(target_channel, msg_id, "✅")
+            except Exception as le:
+                self.send_chunked(target_channel, f"❌ LinkedIn 1-Task Runner Error: `{le}`")
+            return
+
         # 2. Fast path: Real-time System Status Check (Instant response without consuming CLI quota)
         status_triggers = [
             "status", "wht systems", "what systems", "systems running", "system status",

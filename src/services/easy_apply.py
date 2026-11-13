@@ -1,35 +1,108 @@
+import json
+import os
+import random
 import time
 import re
+from pathlib import Path
 from typing import Dict, Any, List
 from playwright.sync_api import sync_playwright
 from .form_answerer import answer_standard_field, answer_open_ended_question, load_candidate_profile
 from ..db import database
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 RIDEALONG_CDP_ENDPOINT = "http://127.0.0.1:9230/default/easy-apply"
+
+
+def _resolve_resume_path(profile: Dict[str, Any]) -> str:
+    candidates = [
+        os.environ.get("RESUME_PATH"),
+        str(Path.home() / "career-agent" / "Vishal_Gupta_Resume.pdf"),
+        str(Path.home() / "career-agent" / "data" / "resume.pdf"),
+        str(PROJECT_ROOT / "Vishal_Gupta_Resume.pdf"),
+        str(PROJECT_ROOT / "data" / "resume.pdf"),
+        profile.get("personal", {}).get("resume_local_pdf_path"),
+    ]
+    return next((c for c in candidates if c and os.path.exists(c)), str(PROJECT_ROOT / "data" / "resume.pdf"))
+
+
+def _resolve_cookie_file() -> str:
+    candidates = [
+        os.environ.get("LINKEDIN_COOKIES_PATH"),
+        str(PROJECT_ROOT / "data" / "linkedin_cookies.json"),
+        str(Path.home() / ".linkedin_cookies.json"),
+    ]
+    return next((c for c in candidates if c and os.path.exists(c)), str(PROJECT_ROOT / "data" / "linkedin_cookies.json"))
+
 
 def apply_to_easy_apply_job(job_url: str, role_title: str = "Associate Product Manager", auto_submit: bool = False) -> Dict[str, Any]:
     """
-    Automates LinkedIn Easy Apply modal for a single job opening.
-    Fills contact info, selects standard resume, and handles screening questions.
+    Automates LinkedIn Easy Apply modal for a single job opening (1-task-at-a-time).
+    Connects to Ridealong if running locally, or falls back to pre-authenticated session cookies
+    in headless Playwright on the Cloud VM. Strictly verifies post-submit receipt + screenshot.
     """
     result = {
         "url": job_url,
         "is_easy_apply": False,
         "submitted": False,
+        "confirmed": False,
+        "already_applied": False,
+        "screenshot_path": None,
         "questions_handled": [],
         "error": None
     }
 
     print(f"[EasyApply] Opening job: {job_url}")
+    data_dir = PROJECT_ROOT / "data"
+    os.makedirs(data_dir, exist_ok=True)
 
     with sync_playwright() as p:
+        browser = None
+        page = None
+        is_local_headless = False
         try:
-            browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
-            context = browser.contexts[0]
+            try:
+                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
+                context = browser.contexts[0]
+            except Exception:
+                cookie_file = _resolve_cookie_file()
+                if not os.path.exists(cookie_file):
+                    result["error"] = "no_authenticated_linkedin_session"
+                    return result
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+                )
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    viewport={"width": 1366, "height": 820}
+                )
+                with open(cookie_file, "r", encoding="utf-8") as cf:
+                    cookies = json.load(cf)
+                context.add_cookies(cookies)
+                is_local_headless = True
+
             page = context.new_page()
 
             page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(3)
+            time.sleep(random.uniform(2.5, 4.2))
+            try:
+                page.mouse.move(random.randint(250, 650), random.randint(200, 480))
+            except Exception:
+                pass
+
+            if any(k in page.url.lower() for k in ["linkedin.com/login", "authwall", "checkpoint"]):
+                result["error"] = "linkedin_session_expired_or_login_wall"
+                return result
+
+            # Check if already applied on LinkedIn
+            already_badge = page.locator(
+                'span.artdeco-inline-feedback__message:has-text("Applied"), '
+                'li-icon[type="success-pebble-icon"] + span:has-text("Applied")'
+            ).first
+            if already_badge.is_visible(timeout=1200):
+                result["already_applied"] = True
+                result["error"] = "already_applied_on_linkedin"
+                return result
 
             # Close any open messaging popups that might block clicks or intercept modal selectors
             for cb in page.locator('aside button:has-text("Close"), button[aria-label*="Close conversation"]').all():
@@ -76,7 +149,7 @@ def apply_to_easy_apply_job(job_url: str, role_title: str = "Associate Product M
                 file_input = modal.locator('input[type="file"]').first
                 try:
                     if file_input.is_visible(timeout=300):
-                        pdf_path = profile.get("personal", {}).get("resume_local_pdf_path", "/Users/admin/linkedin-multiagent/data/resume.pdf")
+                        pdf_path = _resolve_resume_path(profile)
                         file_input.set_input_files(pdf_path)
                         time.sleep(1)
                 except Exception as fe:
@@ -152,41 +225,90 @@ def apply_to_easy_apply_job(job_url: str, role_title: str = "Associate Product M
 
                 if submit_btn.is_visible(timeout=800):
                     if auto_submit:
-                        submit_btn.click()
-                        time.sleep(2)
-                        result["submitted"] = True
-                        print("[EasyApply] Application submitted successfully!")
+                        # Uncheck "Follow <Company>" if visible so feed stays clean
                         try:
-                            from ..agents.discord_notifier import DiscordNotifier
-                            DiscordNotifier().send_application_alert({
-                                "company": "LinkedIn Job Posting",
-                                "role": role_title,
-                                "platform": "LinkedIn (Easy Apply)",
-                                "url": job_url,
-                                "status": "SUBMITTED & CONFIRMED",
-                                "details": "Autofilled screening questions, verified phone/email, attached Vishal_Gupta_Resume.pdf, submitted.",
-                                "resume": "Vishal_Gupta_Resume.pdf"
-                            })
-                        except Exception as ne:
-                            print(f"[EasyApply] Alert error: {ne}")
+                            follow_cb = modal.locator('label[for*="follow-company-checkbox"]').first
+                            if follow_cb.is_visible(timeout=400):
+                                inp_cb = modal.locator('input[id*="follow-company-checkbox"]').first
+                                if inp_cb.count() > 0 and inp_cb.is_checked():
+                                    follow_cb.click()
+                        except Exception:
+                            pass
+
+                        submit_btn.click()
+                        time.sleep(3.5)
+                        result["submitted"] = True
+
+                        # Verify explicit LinkedIn confirmation banner/modal
+                        shot_path = str(data_dir / f"linkedin_apply_{int(time.time())}.png")
+                        try:
+                            page.screenshot(path=shot_path)
+                            result["screenshot_path"] = shot_path
+                        except Exception:
+                            pass
+
+                        body_lower = page.locator("body").inner_text().lower()
+                        has_validation_err = modal.locator('.artdeco-inline-feedback--error:visible').count() > 0
+                        if not has_validation_err and any(
+                            phrase in body_lower
+                            for phrase in [
+                                "application sent",
+                                "your application was sent",
+                                "application submitted",
+                            ]
+                        ):
+                            result["confirmed"] = True
+                            print(f"[EasyApply] Application SUBMITTED & CONFIRMED! Screenshot: {shot_path}")
+                            try:
+                                from ..agents.discord_notifier import DiscordNotifier
+                                DiscordNotifier().send_application_alert({
+                                    "company": "LinkedIn Verified Apply",
+                                    "role": role_title,
+                                    "platform": "LinkedIn (Easy Apply — Verified)",
+                                    "url": job_url,
+                                    "status": "SUBMITTED & CONFIRMED",
+                                    "details": f"Verified 'Application sent' screen. Questions answered: {len(result['questions_handled'])}. Screenshot saved.",
+                                    "resume": "Vishal_Gupta_Resume.pdf"
+                                })
+                            except Exception as ne:
+                                print(f"[EasyApply] Alert error: {ne}")
+                        else:
+                            result["confirmed"] = False
+                            result["error"] = "unconfirmed_or_validation_error_on_submit"
+                            print(f"[EasyApply] Submit clicked, but 'Application sent' NOT confirmed (err_visible={has_validation_err}).")
                     else:
-                        print("[EasyApply] Reached final submission step. Auto-submit is False.")
+                        shot_path = str(data_dir / f"linkedin_preview_{int(time.time())}.png")
+                        try:
+                            page.screenshot(path=shot_path)
+                            result["screenshot_path"] = shot_path
+                        except Exception:
+                            pass
+                        print(f"[EasyApply] Reached final submission step (auto_submit=False). Preview: {shot_path}")
                     break
                 elif review_btn.is_visible(timeout=800):
                     review_btn.click()
                 elif next_btn.is_visible(timeout=800):
                     next_btn.click()
                 else:
+                    # Check if stuck on validation error on intermediate step
+                    if modal.locator('.artdeco-inline-feedback--error:visible').count() > 0:
+                        result["error"] = "unanswered_custom_validation_field"
                     break
 
         except Exception as e:
             print(f"[EasyApply] Error during application: {e}")
             result["error"] = str(e)
         finally:
-            try:
-                page.close()
-            except:
-                pass
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            if browser and is_local_headless:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
 
     return result
 

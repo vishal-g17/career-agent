@@ -54,7 +54,8 @@ def process_redirects(max_jobs: int = 15):
         try:
             res = fill_ats_application(url, role_title=f"{title} @ {comp}", auto_submit=True)
             
-            if res.get("submitted") or res.get("resume_uploaded") or len(res.get("fields_filled", [])) >= 2:
+            # STRICT VERIFICATION: ONLY mark applied if final submit succeeded AND page confirmed receipt
+            if res.get("submitted") and res.get("confirmed"):
                 success_count += 1
                 cur.execute('''
                     UPDATE jobs 

@@ -23,6 +23,7 @@ def fill_ats_application(url: str, role_title: str = "Associate Product Manager"
         "fields_filled": [],
         "resume_uploaded": False,
         "submitted": False,
+        "confirmed": False,
         "screenshot_path": None,
         "error": None
     }
@@ -88,28 +89,26 @@ def fill_ats_application(url: str, role_title: str = "Associate Product Manager"
                     result["error"] = "expired"
                     return result
 
-                # Check if already applied
-                body_txt = page.locator('body').inner_text()[:600]
-                if ("Applied" in body_txt or page.locator('text="Applied", .styles_jhc__top__1o_O3:has-text("Applied")').first.is_visible()):
-                    if not page.locator('#apply-button, button.apply-button').first.is_visible():
-                        result["submitted"] = True
-                        result["already_applied"] = True
-                        result["ats_type"] = "naukri_direct"
-                        print("[ATSFiller] Naukri role already applied previously!")
-                        return result
-
-                comp_btn = page.locator('#company-site-button, button.company-site-button').first
+                comp_btn = page.locator(
+                    '#company-site-button, button.company-site-button, '
+                    'button:has-text("Apply on company site"), a:has-text("Apply on company site")'
+                ).first
                 if comp_btn.is_visible(timeout=3000):
-                    try:
-                        with context.expect_page(timeout=8000) as new_page_info:
-                            comp_btn.click()
-                        page.close()
-                        page = new_page_info.value
-                        target_page = page
-                        page.wait_for_load_state("domcontentloaded")
+                    href = comp_btn.get_attribute("href")
+                    if href and href.startswith("http") and "naukri.com" not in href:
+                        page.goto(href, wait_until="domcontentloaded", timeout=30000)
                         page.wait_for_timeout(3000)
-                    except:
-                        pass
+                    else:
+                        try:
+                            with context.expect_page(timeout=8000) as new_page_info:
+                                comp_btn.click()
+                            page.close()
+                            page = new_page_info.value
+                            target_page = page
+                            page.wait_for_load_state("domcontentloaded")
+                            page.wait_for_timeout(3000)
+                        except Exception:
+                            pass
             elif "linkedin.com" in current_url:
                 print("[ATSFiller] LinkedIn external apply detected...")
                 import urllib.parse
@@ -142,6 +141,24 @@ def fill_ats_application(url: str, role_title: str = "Associate Product Manager"
             dest_url = page.url
             result["ats_url"] = dest_url
             print(f"[ATSFiller] Active destination URL: {dest_url}")
+
+            # STRICT GUARD: Never fill inputs on job boards themselves if redirect failed
+            import urllib.parse as _up
+            dest_host = (_up.urlparse(dest_url).netloc or "").lower()
+            if any(portal_host in dest_host for portal_host in ["naukri.com", "indeed.com", "linkedin.com"]):
+                print(f"[ATSFiller] Redirect remained on job portal ({dest_host}); refusing to mark applied.")
+                result["error"] = f"portal_redirect_not_followed:{dest_host}"
+                return result
+
+            # Stop cleanly if gated by CAPTCHA / anti-bot challenge
+            captcha_frame = page.locator(
+                'iframe[src*="recaptcha"], iframe[src*="hcaptcha"], '
+                'iframe[src*="challenges.cloudflare.com"], iframe[src*="turnstile"]'
+            ).first
+            if captcha_frame.count() > 0 and captcha_frame.is_visible():
+                print("[ATSFiller] Anti-bot / CAPTCHA gate detected; skipping manual verification portal.")
+                result["error"] = "captcha_gate_requires_manual_apply"
+                return result
 
             # Detect ATS platform
             if "greenhouse.io" in dest_url:
@@ -412,39 +429,119 @@ def fill_ats_application(url: str, role_title: str = "Associate Product Manager"
                 else:
                     break
 
-            # 6. TAKE VERIFICATION SCREENSHOT
-            screenshot_path = f"/Users/admin/linkedin-multiagent/data/ats_{int(time.time())}.png"
-            try:
-                page.screenshot(path=screenshot_path, full_page=True)
-                result["screenshot_path"] = screenshot_path
-                print(f"[ATSFiller] Form filled. Screenshot saved: {screenshot_path}")
-            except:
-                pass
+            # 6. SUBMIT FORM IF REQUESTED & STRICTLY VERIFY RECEIPT
+            data_dir = project_root / "data"
+            os.makedirs(data_dir, exist_ok=True)
 
-            # 7. SUBMIT FORM IF REQUESTED
             if auto_submit and (result["resume_uploaded"] or len(result["fields_filled"]) >= 2):
                 modal = page.locator('.modal.show, div[role="dialog"], dialog, #careerAddModal').first
                 scope = modal if modal.is_visible(timeout=1000) else page
-                
-                submit_btn = scope.locator(
-                    'button[data-automation-id="bottom-navigation-submit-button"], button[type="submit"], input[type="submit"], '
-                    'button:has-text("Submit Application"), button:has-text("Submit application"), button:has-text("Submit"), '
-                    'button:has-text("Send Application"), input[value*="Submit" i]'
-                ).first
-                if not submit_btn.is_visible(timeout=1500):
-                    submit_btn = scope.locator('button:has-text("Apply Now"), button:has-text("Apply")').first
 
-                if submit_btn.is_visible(timeout=2000):
-                    submit_btn.click(force=True)
-                    page.wait_for_timeout(4000)
+                pre_submit_url = page.url.lower()
+                try:
+                    pre_submit_text = page.locator('body').inner_text().lower()
+                except Exception:
+                    pre_submit_text = ""
+
+                # Find genuine application submit buttons (never navbar search / login buttons)
+                candidate_btns = scope.locator(
+                    'button[data-automation-id="bottom-navigation-submit-button"], '
+                    'button:has-text("Submit Application"), button:has-text("Submit application"), '
+                    'button:has-text("Send Application"), button:has-text("Complete Application"), '
+                    'button:has-text("Submit"), input[type="submit"], button[type="submit"]'
+                ).all()
+
+                forbidden_btn_words = ("search", "sign in", "log in", "login", "register", "create account", "filter", "subscribe", "cookie")
+                allowed_btn_words = ("submit", "send application", "complete application", "apply for this job", "finish")
+                chosen_submit = None
+                for btn in candidate_btns:
+                    try:
+                        if not btn.is_visible() or not btn.is_enabled():
+                            continue
+                        btn_label = ((btn.inner_text() or "") + " " + (btn.get_attribute("value") or "") + " " + (btn.get_attribute("aria-label") or "")).strip().lower()
+                        if any(fw in btn_label for fw in forbidden_btn_words):
+                            continue
+                        if any(aw in btn_label for aw in allowed_btn_words):
+                            chosen_submit = btn
+                            break
+                    except Exception:
+                        continue
+
+                if chosen_submit is not None:
+                    chosen_submit.click(force=True)
+                    page.wait_for_timeout(5000)
                     result["submitted"] = True
-                    print(f"[ATSFiller] Application successfully SUBMITTED for {role_title}!")
+                    print(f"[ATSFiller] Clicked Submit for {role_title}; verifying confirmation...")
 
-                    # Check for confirmation acknowledgement
-                    page_text = page.locator('body').inner_text().lower()
-                    if any(k in page_text for k in ["thank you", "application submitted", "received your application", "successfully submitted", "congratulations"]):
+                    post_url = page.url.lower()
+                    try:
+                        post_text = page.locator('body').inner_text().lower()
+                    except Exception:
+                        post_text = ""
+
+                    # Check for validation errors blocking submission
+                    error_phrases = [
+                        "this field is required",
+                        "please fill out this field",
+                        "please complete all required",
+                        "cannot be blank",
+                        "please correct the errors",
+                        "invalid email",
+                        "invalid phone",
+                    ]
+                    has_new_validation_error = any(
+                        ep in post_text and ep not in pre_submit_text for ep in error_phrases
+                    )
+                    try:
+                        invalid_count = scope.locator('[aria-invalid="true"]:visible').count()
+                    except Exception:
+                        invalid_count = 0
+
+                    confirmation_phrases = [
+                        "thank you for applying",
+                        "thanks for applying",
+                        "application has been submitted",
+                        "application submitted",
+                        "your application was submitted",
+                        "received your application",
+                        "application has been received",
+                        "we have received your application",
+                        "your application has been sent",
+                        "successfully submitted your application",
+                        "successfully applied",
+                    ]
+                    has_new_confirmation_text = any(
+                        cp in post_text and cp not in pre_submit_text for cp in confirmation_phrases
+                    )
+                    url_confirmed = (
+                        post_url != pre_submit_url
+                        and any(u in post_url for u in ["/confirmation", "/thank-you", "/thankyou", "/submitted", "application-submitted", "applied=true", "success"])
+                    )
+
+                    if not has_new_validation_error and invalid_count == 0 and (has_new_confirmation_text or url_confirmed):
                         result["confirmed"] = True
-                        print(f"[ATSFiller] Submission CONFIRMED on page!")
+                        print(f"[ATSFiller] Submission CONFIRMED on page for {role_title}!")
+                    else:
+                        result["confirmed"] = False
+                        result["error"] = "unconfirmed_after_submit"
+                        print(
+                            f"[ATSFiller] Submit clicked for {role_title}, but NO confirmation receipt detected "
+                            f"(validation_err={has_new_validation_error}, invalid_fields={invalid_count}). Not marking applied."
+                        )
+                else:
+                    result["error"] = "no_valid_submit_button"
+                    print(f"[ATSFiller] No valid application submit button found for {role_title}.")
+            else:
+                result["error"] = "insufficient_form_fields_or_login_wall"
+
+            # 7. TAKE POST-ACTION VERIFICATION SCREENSHOT
+            screenshot_path = str(data_dir / f"ats_{int(time.time())}.png")
+            try:
+                page.screenshot(path=screenshot_path, full_page=True)
+                result["screenshot_path"] = screenshot_path
+                print(f"[ATSFiller] Screenshot saved: {screenshot_path}")
+            except Exception:
+                pass
 
         except Exception as e:
             print(f"[ATSFiller] Exception during ATS fill: {e}")

@@ -53,7 +53,7 @@ def run_naukri_batch(limit: int = 50):
             res = apply_to_naukri_job(url, f"{title} @ {company}")
             status = res.get("status")
 
-            if res.get("applied") or status in ["applied", "already_applied", "external_applied"]:
+            if status in ["applied", "external_applied"]:
                 applied_count += 1
                 cur.execute('''
                     UPDATE jobs 
@@ -70,14 +70,23 @@ def run_naukri_batch(limit: int = 50):
                         DiscordNotifier().send_application_alert({
                             "company": company,
                             "role": title,
-                            "platform": "Naukri (Auto-Apply)",
-                            "url": url,
+                            "platform": "Naukri (External ATS Verified)" if status == "external_applied" else "Naukri (Direct Apply)",
+                            "url": res.get("external_url", url),
                             "status": "SUBMITTED & CONFIRMED",
-                            "details": f"Type: {'External ATS Auto-Apply' if status == 'external_applied' else ('1-Click Direct Apply' if not res.get('questions_answered') else 'Chatbot Screening Completed')}",
+                            "details": f"Type: {'External ATS Auto-Apply (Confirmed)' if status == 'external_applied' else ('1-Click Direct Apply' if not res.get('questions_answered') else 'Chatbot Screening Completed')}",
                             "resume": "Vishal_Gupta_Resume.pdf"
                         })
                     except:
                         pass
+
+            elif status == "already_applied":
+                cur.execute('UPDATE jobs SET status = "applied" WHERE id = ?', (jid,))
+                conn.commit()
+                print(f"[NaukriBatch] -> Already applied previously on Naukri (synced DB without duplicate alert).")
+
+            elif status == "needs_login":
+                print(f"[NaukriBatch] -> Naukri requires logged-in session; leaving jobs in 'new' queue and stopping batch.")
+                break
 
             elif status == "external_redirect":
                 redirect_count += 1

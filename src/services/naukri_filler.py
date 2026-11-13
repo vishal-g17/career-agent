@@ -164,43 +164,45 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
                 page.close()
                 return result
 
-            # 1. Check if already applied
-            applied_indicator = page.locator('text="Applied", text="Already applied", .styles_jhc__top__1o_O3:has-text("Applied")')
+            # 1. Check login requirement vs already applied vs external company redirect
+            login_apply_btn = page.locator(
+                '#login-button, button:has-text("Login to apply"), button:has-text("Register to apply"), a:has-text("Login to apply")'
+            ).first
+            applied_indicator = page.locator(
+                '#already-applied, .already-applied, span.apply-message:has-text("Applied"), '
+                '.styles_jhc__apply-button-container:has-text("Applied")'
+            ).first
             apply_btn = page.locator('#apply-button, button.apply-button').first
-            company_btn = page.locator('#company-site-button, button.company-site-button').first
+            company_btn = page.locator(
+                '#company-site-button, button.company-site-button, button:has-text("Apply on company site"), a:has-text("Apply on company site")'
+            ).first
 
-            page_header_text = page.locator('body').inner_text()[:600]
-            if ("Applied" in page_header_text or applied_indicator.first.is_visible()) and not apply_btn.is_visible():
-                print(f"[NaukriApply] Job already applied!")
-                result["applied"] = True
-                result["status"] = "already_applied"
-                page.close()
-                return result
-
-            # 2. Check if external company redirect
+            # 2. Check if external company redirect FIRST (works with or without Naukri login)
             if company_btn.is_visible() and not apply_btn.is_visible():
                 print(f"[NaukriApply] External redirect role ('Apply on company site'). Extracting destination URL...")
-                dest_url = None
-                try:
-                    with page.expect_popup(timeout=6000) as popup_info:
-                        company_btn.click()
-                    dest_page = popup_info.value
-                    dest_page.wait_for_timeout(2500)
-                    dest_url = dest_page.url
-                    dest_page.close()
-                except Exception as pe:
-                    print(f"[NaukriApply] Popup extraction notice: {pe}")
+                dest_url = company_btn.get_attribute("href")
+                if not dest_url or "naukri.com" in dest_url:
+                    dest_url = None
+                    try:
+                        with page.expect_popup(timeout=6000) as popup_info:
+                            company_btn.click()
+                        dest_page = popup_info.value
+                        dest_page.wait_for_timeout(2500)
+                        dest_url = dest_page.url
+                        dest_page.close()
+                    except Exception as pe:
+                        print(f"[NaukriApply] Popup extraction notice: {pe}")
 
                 page.close()
-                
-                # If popup was extracted, run ATS autofill outside the page context
-                if dest_url and dest_url != job_url:
+
+                # If external portal URL was extracted, run ATS autofill and STRICTLY require confirmed receipt
+                if dest_url and dest_url != job_url and "naukri.com" not in dest_url:
                     print(f"[NaukriApply] Extracted company portal URL: {dest_url}")
                     from .ats_filler import fill_ats_application
                     ats_res = fill_ats_application(dest_url, role_title=role_title, auto_submit=True)
-                    if ats_res.get("submitted"):
+                    if ats_res.get("submitted") and ats_res.get("confirmed"):
                         result["applied"] = True
-                        result["status"] = "applied"
+                        result["status"] = "external_applied"
                         result["external_url"] = dest_url
                         return result
                     else:
@@ -212,6 +214,19 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
                     result["applied"] = False
                     result["status"] = "external_redirect"
                     return result
+
+            if login_apply_btn.is_visible() and not apply_btn.is_visible():
+                print(f"[NaukriApply] Naukri session is logged out ('Login to apply' visible). Skipping without marking failed.")
+                result["status"] = "needs_login"
+                page.close()
+                return result
+
+            if applied_indicator.is_visible() and not apply_btn.is_visible() and not company_btn.is_visible():
+                print(f"[NaukriApply] Job already applied on Naukri!")
+                result["applied"] = True
+                result["status"] = "already_applied"
+                page.close()
+                return result
 
             if not apply_btn.is_visible():
                 print(f"[NaukriApply] No direct apply button visible.")
@@ -225,10 +240,14 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
             time.sleep(3)
 
             # 4. Check if immediately applied without chatbot
-            page_text = page.locator('body').inner_text()
-            if "Applied" in page_text or "You have successfully applied" in page_text:
+            page_text_lower = page.locator('body').inner_text().lower()
+            if (
+                "you have successfully applied" in page_text_lower
+                or "applied successfully" in page_text_lower
+                or applied_indicator.is_visible()
+            ):
                 drawer_check = page.locator('.chatbot_Drawer')
-                if not drawer_check.is_visible():
+                if not drawer_check.is_visible() and not apply_btn.is_visible():
                     print(f"[NaukriApply] 1-Click applied directly without screening!")
                     result["applied"] = True
                     result["status"] = "applied"
@@ -363,16 +382,16 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
                             except:
                                 pass
 
-                    # If no interactive elements found, check if completed
+                    # If no interactive elements found, check if completed via explicit indicator (never substring 'applied' in JD)
                     time.sleep(2)
-                    if not drawer.is_visible() or "applied" in page.locator('body').inner_text().lower():
+                    if not drawer.is_visible() and applied_indicator.is_visible() and not apply_btn.is_visible():
                         result["applied"] = True
                         result["status"] = "applied"
                         break
 
             # Final verification
             page.wait_for_timeout(2000)
-            if page.locator('text="Applied", .styles_jhc__top__1o_O3:has-text("Applied")').first.is_visible() and not apply_btn.is_visible():
+            if applied_indicator.is_visible() and not apply_btn.is_visible() and not company_btn.is_visible():
                 result["applied"] = True
                 result["status"] = "applied"
             
