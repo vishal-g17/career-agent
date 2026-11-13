@@ -56,8 +56,14 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
                 print(f"[LinkedInJobs] Searching: '{kw}' ({url})...")
 
                 try:
+                    from ..services.linkedin_control import sync_control_with_cloud, is_linkedin_logged_out, set_linkedin_enabled
+                    if not sync_control_with_cloud().get("linkedin_enabled", True):
+                        break
                     page.goto(url, wait_until="domcontentloaded", timeout=30000)
                     time.sleep(3)
+                    if is_linkedin_logged_out(page):
+                        set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="linkedin_jobs")
+                        break
 
                     # Close messaging overlays
                     for cb in page.locator('aside button:has-text("Close"), button[aria-label*="Close conversation"]').all():
@@ -69,7 +75,7 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
                     print(f"[LinkedInJobs] Found {len(job_cards)} job cards for '{kw}'")
 
                     for card in job_cards[:8]:
-                        if time.time() >= end_time or applied_count >= max_apps:
+                        if time.time() >= end_time or applied_count >= max_apps or not sync_control_with_cloud().get("linkedin_enabled", True):
                             break
 
                         try:

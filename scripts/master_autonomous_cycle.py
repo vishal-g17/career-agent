@@ -18,6 +18,11 @@ from src.services.easy_apply import apply_to_easy_apply_job
 from src.services.naukri_filler import apply_to_naukri_job
 from src.agents.feed_scanner import scan_personal_feed_for_jobs
 from src.services.exclusion_filter import is_excluded
+from src.services.linkedin_control import (
+    sync_control_with_cloud,
+    set_linkedin_enabled,
+    is_linkedin_logged_out,
+)
 from scripts.scrape_connection_emails import scrape_connection_contacts
 
 DB_PATH = os.path.expanduser('~/.linkedin_agent.db')
@@ -173,6 +178,9 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         try:
             page.goto(compose_url, wait_until="domcontentloaded", timeout=20000)
             page.wait_for_timeout(2500)
+            if is_linkedin_logged_out(page):
+                _handle_linkedin_logout(page)
+                return False
         except Exception as e:
             err_str = str(e)
             if "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_str or "429" in err_str:
@@ -629,6 +637,36 @@ def sync_new_outreach_leads_to_cloud_vm(conn) -> int:
         return 0
 
 
+def _handle_linkedin_logout(page) -> None:
+    """Hard-stops all LinkedIn automation on logout/checkpoint until user explicitly restarts via CLI or #prompt."""
+    cur_url = getattr(page, "url", "") if page else ""
+    print(f"[Cycle:LogoutGuard] 🛑 LinkedIn logout/checkpoint detected ({cur_url})! Hard-stopping all LinkedIn automation.")
+    set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="auto_logout_guard")
+    try:
+        from src.engine.discord_client import DiscordClient
+        from src import config
+        DiscordClient().send_message(
+            config.DISCORD_PROMPT_CHANNEL_ID,
+            "🛑 **LinkedIn Logged Out — All LinkedIn Automation Hard-Stopped!**\n"
+            f"• Detected login/checkpoint URL: `{cur_url}`\n"
+            "• All LinkedIn tasks (messaging, feed hunt, LinkedIn Jobs) are **completely stopped** and will NOT auto-retry.\n"
+            "• Log back in via your Ridealong viewer and send **`start linkedin`** here in `#prompt` (or on CLI) when ready to resume."
+        )
+    except Exception:
+        pass
+
+
+def _sleep_respecting_control(seconds: float) -> bool:
+    """Sleeps in short slices; returns False immediately if LinkedIn automation is stopped via #prompt/CLI."""
+    end_ts = time.time() + seconds
+    while time.time() < end_ts:
+        ctl = sync_control_with_cloud()
+        if not ctl.get("linkedin_enabled", True):
+            return False
+        time.sleep(min(5.0, max(0.5, end_ts - time.time())))
+    return True
+
+
 def send_discord_cycle_note(message: str) -> None:
     """Sends a verified progress log to Discord #agent channel."""
     try:
@@ -711,9 +749,19 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     print("="*70)
 
     # Stage B: Connection Limit Check -> 10m Connections OR 10m Feed Scrape (post bodies only)
+    if not sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage B (10m Feed/Connect)", force=True).get("linkedin_enabled", True):
+        return
+    if is_linkedin_logged_out(page):
+        _handle_linkedin_logout(page)
+        return
     run_connection_or_feed_branch(page, context, conn, window_minutes=10.0)
 
     # Stage C: LinkedIn Jobs Section Application for 10 minutes
+    if not sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage C (10m Jobs Apply)", force=True).get("linkedin_enabled", True):
+        return
+    if is_linkedin_logged_out(page):
+        _handle_linkedin_logout(page)
+        return
     print("[InterBatch:Jobs] Stage C -> Applying in LinkedIn Jobs section for 10 minutes (strict confirmation only)...")
     send_discord_cycle_note(
         "💼 **Stage C — LinkedIn Jobs Section (10-Minute Window)**\n"
@@ -770,15 +818,34 @@ def run_master_cycle(interval_minutes: int = 1):
     with sync_playwright() as p:
         iteration_count = 0
         messages_sent_session = 0
-        batch_msg_count = 0
-        batch_num = 1
+        init_cur = conn.cursor()
+        init_cur.execute('''
+            SELECT count(*) FROM linkedin_connections_outreach 
+            WHERE date(sent_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
+        ''')
+        init_today = init_cur.fetchone()[0]
+        batch_msg_count = init_today % 10
+        batch_num = (init_today // 10) + 1
         browser = None
         context = None
         page = None
+        paused_logged = False
 
         while True:
             try:
                 now_ist = datetime.now(IST)
+
+                # 0. Cloud-Synced Manual / Logout Stop Check (#prompt or CLI)
+                ctl_state = sync_control_with_cloud()
+                if not ctl_state.get("linkedin_enabled", True):
+                    if not paused_logged:
+                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Waiting for 'start linkedin' on #prompt or CLI...")
+                        paused_logged = True
+                    time.sleep(10)
+                    continue
+                if paused_logged:
+                    print("[Cycle:Control] 🟢 LinkedIn automation RESUMED via control state!")
+                    paused_logged = False
 
                 # 1. Check Operating Window & Temporary Suspension
                 if not is_in_active_window():
@@ -800,11 +867,9 @@ def run_master_cycle(interval_minutes: int = 1):
                 elif page is None or page.is_closed():
                     page = context.pages[0] if context.pages else context.new_page()
 
-                # Auth Check: Ensure LinkedIn is logged in
-                if page and ("login" in page.url.lower() or "checkpoint" in page.url.lower()):
-                    now_str = now_ist.strftime('%I:%M %p IST')
-                    print(f"[Cycle:Auth | {now_str}] ⚠️ LinkedIn session requires login (Current URL: {page.url}). Resting 60s...")
-                    time.sleep(60)
+                # Auth Check: If LinkedIn logs out, HARD-STOP all LinkedIn automation until user commands restart!
+                if is_linkedin_logged_out(page):
+                    _handle_linkedin_logout(page)
                     continue
 
                 iteration_count += 1
@@ -821,6 +886,7 @@ def run_master_cycle(interval_minutes: int = 1):
                 queue_pending = cur.fetchone()[0]
 
                 now_fmt = now_ist.strftime('%I:%M %p IST')
+                sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage A ({batch_msg_count}/10 msgs | {daily_1st_sent} today)")
                 print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/10) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
                 # STAGE 0: Queue Check & Auto-Refill if low (only between batches or when critically low)
@@ -841,6 +907,8 @@ def run_master_cycle(interval_minutes: int = 1):
                         first_name = name.split()[0] if name else "there"
                         print(f"[Cycle:StageA] Batch #{batch_num} Msg {batch_msg_count + 1}/10 -> {name} ({headline[:40]}...)")
                         success = turbo_send_1st_degree(page, username, first_name)
+                        if not sync_control_with_cloud().get("linkedin_enabled", True):
+                            continue
                         if success:
                             cur.execute('''
                                 INSERT OR REPLACE INTO linkedin_connections_outreach (id, name, headline, status, sent_at)
@@ -866,7 +934,7 @@ def run_master_cycle(interval_minutes: int = 1):
                             else:
                                 delay_s = random.uniform(55, 68)
                                 print(f"[Cycle:StageA] 1-minute gap: resting {int(delay_s)}s before Message {batch_msg_count + 1}/10...")
-                                time.sleep(delay_s)
+                                _sleep_respecting_control(delay_s)
                         else:
                             cur.execute("UPDATE linkedin_connections_queue SET status='skipped' WHERE id=?", (username,))
                             conn.commit()

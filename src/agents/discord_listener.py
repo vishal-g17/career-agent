@@ -73,6 +73,20 @@ class DiscordListener:
             status_icon = "🟢 RUNNING" if running else "🔴 STOPPED"
             lines.append(f"• {label}: {status_icon}")
 
+        try:
+            from src.services.linkedin_control import read_local_control
+            ctl = read_local_control()
+            li_en = ctl.get("linkedin_enabled", True)
+            li_stage = ctl.get("stage", "idle")
+            li_hb = ctl.get("last_mac_heartbeat", "n/a")
+            li_reason = ctl.get("reason", "active")
+            lines.append(
+                f"• LinkedIn Automation (Cloud-Synced Control): "
+                f"{'🟢 ENABLED' if li_en else '🛑 STOPPED'} (`{li_stage}` | reason: `{li_reason}` | last heartbeat: `{li_hb}`)"
+            )
+        except Exception:
+            pass
+
         if is_mac:
             try:
                 vm_chk = subprocess.run(
@@ -151,7 +165,8 @@ class DiscordListener:
             f"24/7 Oracle Cloud VM (`130.210.108.55`, workspace `{WORKSPACE_DIR}`, Python `{py_exec}`, SQLite DB `{db_loc}`). "
             "Systemd services here: `linkedin-email-worker.service` (24/7 Cold Email rotating `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com` via `src.services.cold_mailer.send_cold_email_smtp`), "
             "`linkedin-portal-worker.service` (24/7 Naukri/Indeed/Greenhouse/Lever auto-apply), and `linkedin-discord-listener.service` (this #prompt CLI daemon). "
-            "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser tasks cannot run from the cloud IP without residential network access."
+            "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser clicks execute over Vishal's residential IP while controlled from HERE via `src.services.linkedin_control` (`/home/opc/.linkedin_control.json`). "
+            f"To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} -m src.services.linkedin_control stop` or `start` or `status`!"
         )
         system_context = (
             "You are Vishal Gupta's Autonomous CLI Agent running 24/7 in Discord #prompt with zero laptop dependency.\n"
@@ -390,14 +405,42 @@ class DiscordListener:
             self.client.add_reaction(target_channel, msg_id, "✅")
             return
 
+        # 2b. Fast path: Cloud-Synced LinkedIn Stop / Start Control (0 LLM tokens)
+        if any(p in lower for p in ["stop linkedin", "pause linkedin", "halt linkedin", "linkedin stop", "disable linkedin"]):
+            from src.services.linkedin_control import set_linkedin_enabled
+            st = set_linkedin_enabled(False, reason="stopped_via_discord_prompt", updated_by="discord_prompt")
+            self.send_chunked(
+                target_channel,
+                f"🛑 **LinkedIn Automation STOPPED** (`{st['updated_at']}`).\n"
+                "• All LinkedIn tasks (messaging, feed hunt, LinkedIn Jobs) will stay completely paused until you send `start linkedin` here in `#prompt` or on CLI."
+            )
+            self.client.add_reaction(target_channel, msg_id, "🛑")
+            return
+
+        if any(p in lower for p in ["start linkedin", "resume linkedin", "linkedin start", "enable linkedin"]):
+            from src.services.linkedin_control import set_linkedin_enabled
+            st = set_linkedin_enabled(True, reason="started_via_discord_prompt", updated_by="discord_prompt")
+            self.send_chunked(
+                target_channel,
+                f"🟢 **LinkedIn Automation ENABLED** (`{st['updated_at']}`).\n"
+                "• Sequential 1-task LinkedIn cycle is active and will resume on the next heartbeat (~5–12s)."
+            )
+            self.client.add_reaction(target_channel, msg_id, "✅")
+            return
+
         # 3. Emergency Safety Pause
         if any(w in lower for w in ["emergency stop", "kill all workers", "pause everything"]):
+            try:
+                from src.services.linkedin_control import set_linkedin_enabled
+                set_linkedin_enabled(False, reason="emergency_stop", updated_by="discord_prompt")
+            except Exception:
+                pass
             subprocess.run("pkill -f 'master_autonomous_cycle'", shell=True)
             subprocess.run("pkill -f 'run_email_worker'", shell=True)
             subprocess.run("pkill -f 'run_portal_worker'", shell=True)
             self.client.send_message(
                 target_channel,
-                "🛑 **EMERGENCY STOP TRIGGERED:** All background automation processes stopped."
+                "🛑 **EMERGENCY STOP TRIGGERED:** LinkedIn control disabled and background workers stopped."
             )
             self.client.add_reaction(target_channel, msg_id, "🛑")
             return

@@ -211,12 +211,16 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
 
         try:
             # 1. SCAN PERSONAL HOME FEED
+            from ..services.linkedin_control import sync_control_with_cloud, is_linkedin_logged_out, set_linkedin_enabled
             print("[FeedScanner] Stage 1: Navigating to Personal Feed (https://www.linkedin.com/feed/)...")
             page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=25000)
             page.wait_for_timeout(3000)
+            if is_linkedin_logged_out(page):
+                set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="feed_scanner")
+                return []
 
             for _ in range(10):
-                if time.time() >= deadline:
+                if time.time() >= deadline or not sync_control_with_cloud().get("linkedin_enabled", True):
                     break
                 page.mouse.wheel(0, 1100)
                 page.wait_for_timeout(3500)
@@ -235,16 +239,19 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
             ]
 
             for query in search_queries:
-                if time.time() >= deadline:
+                if time.time() >= deadline or not sync_control_with_cloud().get("linkedin_enabled", True):
                     break
                 try:
                     search_url = f"https://www.linkedin.com/search/results/content/?keywords={urllib.parse.quote(query)}&sortBy=%22date_posted%22"
                     print(f"\n[FeedScanner] Stage 2: Searching LinkedIn Posts for: {query}...")
                     page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
                     page.wait_for_timeout(3500)
+                    if is_linkedin_logged_out(page):
+                        set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="feed_scanner")
+                        return all_leads
 
                     for _ in range(10):
-                        if time.time() >= deadline:
+                        if time.time() >= deadline or not sync_control_with_cloud().get("linkedin_enabled", True):
                             break
                         page.mouse.wheel(0, 1100)
                         page.wait_for_timeout(4000)
