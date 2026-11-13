@@ -8,7 +8,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 DB_PATH = Path.home() / '.linkedin_agent.db'
-OUTPUT_DIR = Path('/Users/admin/linkedin-multiagent/data')
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / 'data'
 OUTPUT_XLSX = OUTPUT_DIR / 'MASTER_LEADS_SHEET.xlsx'
 OUTPUT_ACTIVE_CSV = OUTPUT_DIR / 'ACTIVE_DELIVERED_LEADS.csv'
 OUTPUT_DISCARDED_CSV = OUTPUT_DIR / 'DISCARDED_BOUNCED_LEADS.csv'
