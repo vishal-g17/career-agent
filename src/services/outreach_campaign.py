@@ -31,13 +31,45 @@ def get_active_senders(sender_mode: str = "rotate") -> List[str]:
 
     return senders
 
+DAILY_CAP_NSUT = int(os.environ.get("DAILY_CAP_NSUT", "1500"))
+DAILY_CAP_GMAIL = int(os.environ.get("DAILY_CAP_GMAIL", "500"))
+
+
+def get_sender_daily_cap(sender_addr: str) -> int:
+    return DAILY_CAP_NSUT if "nsut" in (sender_addr or "").lower() else DAILY_CAP_GMAIL
+
+
+def get_today_sender_counts(conn) -> Dict[str, int]:
+    rows = conn.execute(
+        """
+        SELECT sender_email, COUNT(*) as cnt
+        FROM outreach_leads
+        WHERE status = 'sent'
+          AND date(COALESCE(last_sent_at, first_sent_at), '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
+        GROUP BY sender_email
+        """
+    ).fetchall()
+    return {(r["sender_email"] or "").strip().lower(): int(r["cnt"]) for r in rows}
+
+
 def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 30, sender_mode: str = "rotate") -> Dict[str, Any]:
     """
     Sends a controlled, highly deliverable 1-on-1 batch of cold emails to pending leads.
-    Rotates between NSUT Google Workspace and personal Gmail for maximum deliverability,
-    enforcing natural human delays (25–45s) and automatic anti-bounce verification.
+    Rotates between NSUT (max 1,500/day) and personal Gmail (max 500/day),
+    with randomized sub-20s delays and automatic anti-bounce verification.
     """
     conn = database.get_connection()
+    senders = get_active_senders(sender_mode)
+    today_counts = get_today_sender_counts(conn)
+
+    available_init = [
+        s for s in senders
+        if today_counts.get(s.lower(), 0) < get_sender_daily_cap(s)
+    ]
+    if not available_init:
+        print(f"[OutreachCampaign] Daily sender caps reached for today IST ({today_counts}). Waiting until midnight IST.")
+        return {"attempted": 0, "sent": 0, "bounced": 0, "daily_cap_reached": True, "results": []}
+
     query = "SELECT * FROM outreach_leads WHERE status = 'pending'"
     params = []
 
@@ -88,8 +120,21 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
                 c.execute("UPDATE outreach_leads SET status = 'excluded' WHERE id = ?", (lead_id,))
             continue
 
-        # Round-robin selection between active sending accounts
-        current_sender = senders[i % len(senders)]
+        # Round-robin selection across senders still below their daily cap (500 Gmail / 1500 NSUT)
+        eligible_senders = [
+            s for s in senders
+            if today_counts.get(s.lower(), 0) < get_sender_daily_cap(s)
+        ]
+        if not eligible_senders:
+            print(f"[OutreachCampaign] Daily sender caps reached mid-batch ({today_counts}). Stopping batch.")
+            return {
+                "attempted": i,
+                "sent": sent_count,
+                "bounced": bounced_count,
+                "daily_cap_reached": True,
+                "results": results,
+            }
+        current_sender = eligible_senders[i % len(eligible_senders)]
 
         # 1. Compose tailored 1-on-1 pitch with appropriate institutional signature
         mail_data = compose_cold_email(
@@ -119,7 +164,9 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
                     (current_sender, mail_data["subject"], lead_id)
                 )
                 sent_count += 1
-                status_str = f"sent via {current_sender}"
+                today_counts[current_sender.lower()] = today_counts.get(current_sender.lower(), 0) + 1
+                cap_cur = get_sender_daily_cap(current_sender)
+                status_str = f"sent via {current_sender} ({today_counts[current_sender.lower()]}/{cap_cur} today)"
             else:
                 c.execute("UPDATE outreach_leads SET status = 'bounced' WHERE id = ?", (lead_id,))
                 bounced_count += 1
@@ -134,9 +181,9 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
         })
 
         if i < len(leads) - 1:
-            # High-speed dual-sender delay (10 to 14 seconds, alternating senders ensures 20-28s per account)
-            jitter = random.randint(10, 14)
-            print(f"[OutreachCampaign] Waiting {jitter}s before next send ({i+1}/{len(leads)})...")
+            # Randomized sub-20-second delay (4.5s - 19.5s)
+            jitter = round(random.uniform(4.5, 19.5), 1)
+            print(f"[OutreachCampaign] Random <20s timer: waiting {jitter}s before next send ({i+1}/{len(leads)})...")
             time.sleep(jitter)
 
     print(f"[OutreachCampaign] Batch complete. Sent: {sent_count}, Bounced/Blocked: {bounced_count}")
