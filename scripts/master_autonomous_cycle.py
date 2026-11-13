@@ -805,7 +805,7 @@ def is_in_active_window() -> bool:
         return False
     return 10 <= now_ist.hour < 23
 
-def run_master_cycle(interval_minutes: int = 1):
+def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False):
     init_master_db()
     conn = sqlite3.connect(DB_PATH)
 
@@ -886,6 +886,11 @@ def run_master_cycle(interval_minutes: int = 1):
                 queue_pending = cur.fetchone()[0]
 
                 now_fmt = now_ist.strftime('%I:%M %p IST')
+                if start_inter_batch:
+                    start_inter_batch = False
+                    run_inter_batch_activities(page, context, conn, batch_num=max(1, batch_num - 1))
+                    continue
+
                 sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage A ({batch_msg_count}/10 msgs | {daily_1st_sent} today)")
                 print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/10) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
@@ -956,4 +961,4 @@ def run_master_cycle(interval_minutes: int = 1):
                 time.sleep(20)
 
 if __name__ == "__main__":
-    run_master_cycle(interval_minutes=1)
+    run_master_cycle(interval_minutes=1, start_inter_batch=("--inter-batch" in sys.argv))
