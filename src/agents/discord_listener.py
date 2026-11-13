@@ -56,27 +56,40 @@ class DiscordListener:
         lines = [f"📊 **Live Systems Status Report** ({now_str})\n"]
 
         ps_res = subprocess.run(['ps', 'aux'], capture_output=True, text=True).stdout
-        procs = {
+        is_mac = sys.platform == "darwin"
+        lines.append(f"**Active Host (`{'Mac + Ridealong' if is_mac else 'Oracle Cloud VM'}`):**")
+        local_procs = {
+            'LinkedIn Master Cycle (1-Task Loop)': 'master_autonomous_cycle.py',
+            'Ridealong Browser Daemon': 'ridealong',
+            'Discord CLI Listener': 'discord_listener.py',
+        } if is_mac else {
             'Portal ATS Hunter': 'run_portal_worker.py',
             'Cold Email Worker': 'run_email_worker.py',
-            'Discord Listener': 'discord_listener.py'
+            'Discord Listener': 'discord_listener.py',
         }
-        lines.append("**Processes (Cloud VM):**")
-        for label, pat in procs.items():
+        for label, pat in local_procs.items():
             running = any(pat in l for l in ps_res.splitlines())
             status_icon = "🟢 RUNNING" if running else "🔴 STOPPED"
             lines.append(f"• {label}: {status_icon}")
 
-        # Check Headless Playwright / Chromium status
-        has_active_chrome = any(k in ps_res for k in ['chrome-headless-shell', 'playwright', 'chromium'])
-        portal_running = any('run_portal_worker.py' in l for l in ps_res.splitlines())
-        if has_active_chrome:
-            chrome_status = "🟢 ACTIVE (Scraping/Applying)"
-        elif portal_running:
-            chrome_status = "🟢 READY (Cycles On-Demand)"
-        else:
-            chrome_status = "🔴 STOPPED"
-        lines.append(f"• Headless Chromium: {chrome_status}")
+        if is_mac:
+            try:
+                vm_chk = subprocess.run(
+                    [
+                        "ssh", "-i", "/Users/admin/Downloads/agent-vm-key.key",
+                        "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=4",
+                        "opc@130.210.108.55",
+                        "systemctl is-active linkedin-portal-worker.service linkedin-email-worker.service"
+                    ],
+                    capture_output=True, text=True, timeout=6
+                ).stdout.strip().splitlines()
+                pw_ok = len(vm_chk) >= 1 and vm_chk[0].strip() == "active"
+                ew_ok = len(vm_chk) >= 2 and vm_chk[1].strip() == "active"
+                lines.append("\n**24/7 Oracle Cloud VM (`130.210.108.55`):**")
+                lines.append(f"• Portal ATS Hunter: {'🟢 RUNNING' if pw_ok else '🔴 STOPPED'}")
+                lines.append(f"• Cold Email Worker: {'🟢 RUNNING' if ew_ok else '🔴 STOPPED'}")
+            except Exception:
+                pass
 
         try:
             db_path = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
@@ -108,64 +121,117 @@ class DiscordListener:
         return "\n".join(lines)
 
     def ask_gemini_agent(self, prompt: str) -> str:
-        """Fallback conversational intelligence via Gemini Flash API when agy binary is not present on VM."""
+        """Tool-enabled, memory-aware Gemini agent fallback when agy binary is not installed (e.g. on Linux VM)."""
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key and os.path.exists(str(PROJECT_ROOT / ".env")):
             for line in open(str(PROJECT_ROOT / ".env")):
                 if line.startswith("GEMINI_API_KEY="):
-                    api_key = line.strip().split("=", 1)[1]
+                    api_key = line.strip().split("=", 1)[1].strip().strip('"').strip("'")
         if not api_key:
             return "❌ Agent Error: No `GEMINI_API_KEY` configured in `.env`."
 
-        system_context = (
-            "You are Vishal Gupta's Autonomous Multi-Agent Career Acceleration System, "
-            "running 24/7 on an Oracle Cloud Infrastructure VM (Always Free Tier, 130.210.108.55) in Mumbai. "
-            "You manage 3 core parallel daemons: "
-            "1) Job Portal Worker (autonomous headless Chromium applying on Naukri, Indeed, Greenhouse, Lever), "
-            "2) Cold Email Outreach Worker (paced dual-sender SMTP alternating NSUT webmail & Gmail), "
-            "3) Discord Command Center (#prompt). "
-            "Candidate Profile: Vishal Gupta, B.Tech NSUT Delhi, 1 yr experience in APM / Product & Analytics, "
-            "immediate joiner (15-day notice period). "
-            "Confidentiality rule: NEVER mention past employer names under any circumstances. "
-            "Important note on Ridealong / Headless Chromium: Ridealong was only the temporary local browser on the corporate laptop; "
-            "the system now uses native headless Playwright Chromium running 24/7 autonomously on the cloud VM with zero laptop dependency. "
-            "Answer the user's questions clearly, concisely, and supportively."
+        is_mac = sys.platform == "darwin"
+        host_desc = (
+            "Local Mac (`/Users/admin/linkedin-multiagent`) connected to Ridealong (`127.0.0.1:9230`) + SSH access to OCI VM `opc@130.210.108.55` (`-i ~/Downloads/agent-vm-key.key`)."
+            if is_mac else
+            "Oracle Cloud VM (`130.210.108.55`, `/home/opc/career-agent`). Note: LinkedIn blocks OCI datacenter IPs with HTTP 403, so LinkedIn runs on Vishal's Mac Ridealong daemon while Portal ATS + Cold Email run 24/7 here on OCI."
         )
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": f"System Context:\n{system_context}\n\nUser Question:\n{prompt}"}
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "maxOutputTokens": 800,
-                "temperature": 0.3
-            }
-        }
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        system_context = (
+            "You are Vishal Gupta's CLI-grade Career Automation Agent in Discord #prompt.\n"
+            f"Current execution host: {host_desc}\n"
+            "STRICT HONESTY & EXECUTION RULES:\n"
+            "1) You have a real shell tool `execute_shell_command`. Use it to inspect processes (`ps aux`), check SQLite DB (`~/.linkedin_agent.db`), read logs, or start/stop scripts.\n"
+            "2) NEVER hallucinate or roleplay fake execution logs! NEVER claim a message was sent, a job was applied to, or a worker started unless you actually ran `execute_shell_command` and verified the output.\n"
+            "3) NEVER mention past employer names under any circumstances.\n"
+            "4) Keep answers concise, factual, and CLI-accurate."
+        )
+
+        # Build real multi-turn chat history from recent Discord messages in #prompt
+        contents: List[Dict[str, Any]] = []
         try:
-            resp = urllib.request.urlopen(req, timeout=30)
-            res_json = json.loads(resp.read().decode())
-            return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception as e:
-            return f"❌ AI Response Error: `{e}`"
+            recent_msgs = self.client.get_channel_messages(self.channel_id, limit=8)
+            for m in reversed(recent_msgs):
+                c_txt = (m.get("content") or "").strip()
+                if not c_txt or c_txt == prompt.strip():
+                    continue
+                is_bot = bool((m.get("author") or {}).get("bot"))
+                role = "model" if is_bot else "user"
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"][0]["text"] += "\n" + c_txt[:1000]
+                else:
+                    contents.append({"role": role, "parts": [{"text": c_txt[:1000]}]})
+        except Exception:
+            pass
+        if contents and contents[0]["role"] == "model":
+            contents = contents[1:]
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+
+        tools_spec = [{
+            "functionDeclarations": [{
+                "name": "execute_shell_command",
+                "description": "Execute a bash command in the career-agent workspace and return real stdout/stderr.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "command": {"type": "STRING", "description": "Shell command to run"}
+                    },
+                    "required": ["command"]
+                }
+            }]
+        }]
+
+        model_name = "gemini-2.5-flash"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+
+        for _ in range(4):
+            payload = {
+                "systemInstruction": {"parts": [{"text": system_context}]},
+                "contents": contents,
+                "tools": tools_spec,
+                "generationConfig": {"maxOutputTokens": 1000, "temperature": 0.2}
+            }
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            try:
+                resp = urllib.request.urlopen(req, timeout=45)
+                res_json = json.loads(resp.read().decode())
+                cand_content = res_json["candidates"][0]["content"]
+                parts = cand_content.get("parts", [])
+                fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
+                if not fn_calls:
+                    text_parts = [p.get("text", "") for p in parts if "text" in p]
+                    return "\n".join(text_parts).strip() or "✅ Done."
+
+                contents.append(cand_content)
+                fn_responses = []
+                for fc in fn_calls:
+                    cmd_str = (fc.get("args") or {}).get("command", "")
+                    print(f"[DiscordCLI:GeminiTool] Running: {cmd_str}")
+                    tool_out = self.execute_bash_direct(cmd_str)
+                    fn_responses.append({
+                        "functionResponse": {
+                            "name": fc["name"],
+                            "response": {"output": tool_out}
+                        }
+                    })
+                contents.append({"role": "user", "parts": fn_responses})
+            except Exception as e:
+                return f"❌ AI Tool-Agent Error: `{e}`"
+
+        return "⚠️ Completed tool steps; check `!sh ps aux` or `status` for latest state."
 
     def run_antigravity_cli_turn(self, prompt: str, target_channel: str, msg_id: str) -> str:
         """
-        Executes the prompt through the Antigravity (AGY) CLI engine if available,
-        or falls back directly to the Gemini agent.
+        Executes the prompt through the Antigravity (AGY) CLI engine in an isolated persistent
+        session directory (~/.discord_agy_workspace) so it never collides with open TUI sessions,
+        or falls back to the tool-enabled Gemini agent when agy is unavailable.
         """
         if not shutil.which(AGY_BIN) and not os.path.exists(AGY_BIN):
-            print(f"[DiscordCLI:AGY] AGY binary not found at '{AGY_BIN}'. Routing to Gemini agent fallback...")
+            print(f"[DiscordCLI:AGY] AGY binary not found at '{AGY_BIN}'. Routing to tool-enabled Gemini agent...")
             return self.ask_gemini_agent(prompt)
 
         print(f"[DiscordCLI:AGY] Dispatching turn to Antigravity CLI: {prompt}")
 
-        # Continuous typing indicator while Antigravity thinks and acts
         stop_typing = threading.Event()
         def keep_typing():
             while not stop_typing.is_set():
@@ -178,31 +244,57 @@ class DiscordListener:
         t_thread = threading.Thread(target=keep_typing, daemon=True)
         t_thread.start()
 
-        cmd = [
-            AGY_BIN,
-            "-c",
-            "-p",
-            prompt,
-            "--add-dir", WORKSPACE_DIR,
-            "--dangerously-skip-permissions"
-        ]
+        agy_session_dir = os.path.expanduser("~/.discord_agy_workspace")
+        os.makedirs(agy_session_dir, exist_ok=True)
+        init_marker = os.path.join(agy_session_dir, ".agy_initialized")
+        has_prior_session = os.path.exists(init_marker)
+
+        effective_prompt = prompt
+        if not has_prior_session:
+            effective_prompt = (
+                f"[Context: You are Vishal's Discord #prompt CLI agent. Workspace: {WORKSPACE_DIR}. "
+                f"Local Mac runs Ridealong (:9230) + `scripts/master_autonomous_cycle.py` (LinkedIn 1-task loop: 10 msgs @ 1m gap -> 10m connections or post-body feed hunt -> 10m LinkedIn Jobs -> repeat). "
+                f"OCI Cloud VM `opc@130.210.108.55` (`-i ~/Downloads/agent-vm-key.key`) runs 24/7 `linkedin-portal-worker` & `linkedin-email-worker`. "
+                f"Always inspect real processes/SQLite (`~/.linkedin_agent.db`) before claiming anything started or sent. Never leak past employer names.]\n\n"
+                f"User message: {prompt}"
+            )
+
+        def _invoke_agy(use_continue: bool, p_text: str):
+            cmd = [AGY_BIN]
+            if use_continue:
+                cmd.append("-c")
+            cmd.extend([
+                "-p", p_text,
+                "--add-dir", WORKSPACE_DIR,
+                "--dangerously-skip-permissions"
+            ])
+            return subprocess.run(cmd, cwd=agy_session_dir, capture_output=True, text=True, timeout=180)
 
         try:
-            res = subprocess.run(cmd, cwd=WORKSPACE_DIR, capture_output=True, text=True, timeout=180)
+            res = _invoke_agy(has_prior_session, effective_prompt)
+            stderr_lower = (res.stderr or "").lower()
+            # Self-heal if continuation fails (e.g., first run or corrupted thought signature)
+            if res.returncode != 0 and has_prior_session and any(
+                err_k in stderr_lower for err_k in ["no previous", "no conversation", "thought signature", "invalid_argument", "not found"]
+            ):
+                print("[DiscordCLI:AGY] Continuation session reset needed; starting fresh clean AGY conversation...")
+                res = _invoke_agy(False, effective_prompt)
+
             stop_typing.set()
-            stdout = res.stdout.strip()
-            stderr = res.stderr.strip()
+            stdout = (res.stdout or "").strip()
+            stderr = (res.stderr or "").strip()
+
+            if res.returncode == 0 or stdout:
+                try:
+                    Path(init_marker).write_text("ok\n")
+                except Exception:
+                    pass
 
             if stdout:
                 return stdout
             elif stderr:
                 if "RESOURCE_EXHAUSTED" in stderr or "quota reached" in stderr:
-                    fallback_status = self.get_system_status_text()
-                    return (
-                        f"⚠️ **Antigravity CLI Quota Reached** (Individual limit resets in ~25h).\n\n"
-                        f"💡 *Direct terminal commands (`!sh <cmd>`) and status checks work 100% offline with zero quota!*\n\n"
-                        f"{fallback_status}"
-                    )
+                    return self.ask_gemini_agent(prompt)
                 return f"⚠️ **CLI Notice:**\n```text\n{stderr[:1500]}\n```"
             else:
                 return "✅ Action completed by Antigravity CLI."

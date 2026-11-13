@@ -23,7 +23,7 @@ from scripts.scrape_connection_emails import scrape_connection_contacts
 DB_PATH = os.path.expanduser('~/.linkedin_agent.db')
 RIDEALONG_CDP_ENDPOINT = "http://127.0.0.1:9230/default/master-cycle"
 CV_LINK = "https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing"
-PDF_PATH = "/Users/admin/linkedin-multiagent/data/resume.pdf"
+PDF_PATH = str(PROJECT_ROOT / "data" / "resume.pdf")
 
 def init_master_db():
     conn = sqlite3.connect(DB_PATH)
@@ -179,7 +179,7 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
                 # Differentiate between a non-connection 429/404 and a real session block
                 is_real_rate_limit = False
                 try:
-                    test_page = context.new_page()
+                    test_page = page.context.new_page()
                     resp = test_page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=8000)
                     if resp and resp.status == 429:
                         is_real_rate_limit = True
@@ -242,6 +242,10 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         # If agent previously sent a pitch -> send follow-up update.
         # Otherwise -> send standard primary pitch to all.
 
+        if has_agent_sent_prior_pitch:
+            print(f"[Cycle:1stDegree] Prior pitch already sent to {username}; skipping duplicate.")
+            return False
+
         # Attach PDF CV
         file_input = page.locator('input.msg-form__attachment-upload-input[accept*=".pdf"], .msg-form input[type="file"]').last
         try:
@@ -251,8 +255,8 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         except:
             pass
 
-        # Always send the standard primary pitch to all connections
-        print(f"[Cycle:1stDegree] Sending standard primary pitch with updated CV to {first_name}.")
+        # Send standard primary pitch with updated CV
+        print(f"[Cycle:1stDegree] Sending standard primary pitch with updated CV to {first_name} ({username}).")
         msg = (
             f"Hey {first_name}, hope you're doing well!\n\n"
             f"I'm reaching out as I was recently affected by a team-wide layoff / startup restructuring and am actively looking for my next chapter. To share quick context: I bring 1 yr of full-time experience across product & analytics (B.Tech from NSUT Delhi). My prior stints were an off-campus venture with a founder followed by my campus placement, and with the recent restructuring, I'm available to join immediately (15-day notice).\n\n"
@@ -264,18 +268,29 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
 
         composer.click()
         page.keyboard.insert_text(msg)
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(1000)
 
-        # Click Send
-        send_btn = page.locator('button.msg-form__send-button, button:has-text("Send")').first
+        # Click Send and verify dispatch
+        send_btn = page.locator('button.msg-form__send-button, button[type="submit"]:has-text("Send"), button:has-text("Send")').first
         if send_btn.is_visible() and send_btn.is_enabled():
             send_btn.click()
-            page.wait_for_timeout(2000)
-            return True
         else:
-            page.keyboard.press("Meta+Enter")
-            page.wait_for_timeout(2000)
-            return True
+            page.keyboard.press("Enter")
+            page.wait_for_timeout(600)
+            if composer.inner_text().strip():
+                page.keyboard.press("Meta+Enter")
+
+        page.wait_for_timeout(2500)
+        remaining_draft = ""
+        try:
+            remaining_draft = composer.inner_text().strip()
+        except Exception:
+            pass
+        if len(remaining_draft) > 40:
+            print(f"[Cycle:1stDegree] ⚠️ Composer still contains unsent draft for {username}; not counting as sent.")
+            return False
+        print(f"[Cycle:1stDegree] ✅ Verified message dispatched to {first_name} ({username})!")
+        return True
     finally:
         try:
             page.evaluate('() => document.querySelectorAll(".msg-overlay-container, .msg-overlay-list-bubble").forEach(el => el.remove())')
@@ -564,98 +579,173 @@ def run_portal_apply_stage(conn, max_naukri: int = 3, max_redirects: int = 3, **
     except Exception as re_err:
         print(f"[Cycle:Redirects] Subprocess error: {re_err}")
 
-def run_feed_scan_stage():
-    """Scans LinkedIn personal feed for informal hiring posts & recruiter emails in an isolated subprocess."""
-    print("[Cycle:Feed] Executing isolated personal feed scan...")
+def sync_new_outreach_leads_to_cloud_vm(conn) -> int:
+    """Pushes recent 'pending' outreach_leads scraped from LinkedIn posts to the 24/7 OCI Cloud Email Worker DB."""
+    ssh_key = os.path.expanduser("~/Downloads/agent-vm-key.key")
+    if not os.path.exists(ssh_key):
+        return 0
     try:
-        feed_cmd = "import sys; sys.path.insert(0, '/Users/admin/linkedin-multiagent'); from src.agents.feed_scanner import scan_personal_feed_for_jobs; scan_personal_feed_for_jobs()"
-        subprocess.run([sys.executable, "-c", feed_cmd], timeout=180)
-    except Exception as fe:
-        print(f"[Cycle:Feed] Feed scan error: {fe}")
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT name, email, company, role_target
+            FROM outreach_leads
+            WHERE status = 'pending'
+            ORDER BY id DESC
+            LIMIT 40
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return 0
+        import json
+        payload_json = json.dumps(rows)
+        remote_py = (
+            "import sys, json, sqlite3; "
+            "rows = json.loads(sys.stdin.read()); "
+            "conn = sqlite3.connect('/home/opc/.linkedin_agent.db'); "
+            "c = conn.cursor(); "
+            "before = conn.total_changes; "
+            "c.executemany(\"INSERT OR IGNORE INTO outreach_leads (name, email, company, role_target, status, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP)\", rows); "
+            "added = conn.total_changes - before; "
+            "conn.commit(); conn.close(); print(added)"
+        )
+        proc = subprocess.run(
+            [
+                "ssh", "-i", ssh_key,
+                "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5",
+                "opc@130.210.108.55",
+                f"/home/opc/career-agent/venv/bin/python3 -c '{remote_py}'"
+            ],
+            input=payload_json, capture_output=True, text=True, timeout=15
+        )
+        added_remote = int((proc.stdout or "0").strip() or "0")
+        if added_remote > 0:
+            print(f"[Cycle:CloudSync] ☁️ Synced {added_remote} fresh post-body email lead(s) to OCI Cloud Email Worker!")
+        return added_remote
+    except Exception as e:
+        print(f"[Cycle:CloudSync] Notice: {e}")
+        return 0
 
-def test_and_send_connection_requests(page, context, conn):
-    """
-    Tries sending a connection request each cycle to detect when the weekly limit is renewed.
-    If limit is still active, logs and notifies Discord #agent channel.
-    If renewed, sends celebratory notification to Discord and continues sending requests up to daily quota.
-    """
-    print("[ConnectionLimitCheck] Testing if weekly connection limit has renewed...")
+
+def send_discord_cycle_note(message: str) -> None:
+    """Sends a verified progress log to Discord #agent channel."""
     try:
         from src.agents.discord_notifier import DiscordNotifier
         from src import config
-        notifier = DiscordNotifier()
-        
-        # Test 1 request
-        res = discover_and_send_poc_invitation(page, context, conn)
-        if res == "LIMIT_REACHED":
-            print("[ConnectionLimitCheck] Weekly invitation limit is still active.")
-            notifier.client.send_message(
-                config.DISCORD_AGENT_CHANNEL_ID,
-                "⚠️ **LinkedIn Weekly Connection Limit Check**\n"
-                "• Weekly invitation limit is still **ACTIVE** on LinkedIn.\n"
-                "• Tested with 1 connection attempt (modal handled gracefully).\n"
-                "• Will automatically re-test on the next loop to detect immediate renewal."
-            )
-            return False
-        elif res is True:
-            print("[ConnectionLimitCheck] 🎉 Weekly invitation limit has been RENEWED!")
-            notifier.client.send_message(
-                config.DISCORD_AGENT_CHANNEL_ID,
-                "🎉 **LinkedIn Weekly Connection Limit RENEWED!**\n"
-                "• Successfully sent connection request to product/talent lead.\n"
-                "• Resuming connection invitations up to safe daily quota!"
-            )
-            # Send up to 3 more in this batch
-            for _ in range(3):
-                time.sleep(random.uniform(45, 60))
-                r = discover_and_send_poc_invitation(page, context, conn)
-                if r == "LIMIT_REACHED":
-                    break
-            return True
-    except Exception as e:
-        print(f"[ConnectionLimitCheck] Notice: {e}")
-        return False
+        DiscordNotifier().client.send_message(config.DISCORD_AGENT_CHANNEL_ID, message)
+    except Exception:
+        pass
 
-def run_inter_batch_activities(page, context, conn, max_pocs: int = 1):
-    """Executes during the gap after every 10 messages per user directive:
-    1. Send Connection Request (tests if weekly limit renewed)
-    2. Scrape Feed for ~10 minutes
-    3. Apply in Jobs section of LinkedIn for ~10 minutes
+
+def run_feed_scan_stage(conn=None, duration_minutes: float = 10.0) -> int:
+    """Scans LinkedIn personal feed & hiring posts (post body ONLY, never comments) for ~duration_minutes."""
+    print(f"[Cycle:Feed] Executing {duration_minutes:.1f}-minute personal feed & hiring post hunt (post bodies only)...")
+    leads_count = 0
+    try:
+        leads = scan_personal_feed_for_jobs(duration_minutes=duration_minutes)
+        leads_count = len(leads or [])
+        if conn is not None:
+            sync_new_outreach_leads_to_cloud_vm(conn)
+    except Exception as fe:
+        print(f"[Cycle:Feed] Feed scan error: {fe}")
+    return leads_count
+
+
+def run_connection_or_feed_branch(page, context, conn, window_minutes: float = 10.0) -> None:
+    """
+    Stage B of User Cycle:
+    1. Check connection limit by attempting 1 connection invite.
+    2. If allowed -> keep sending connection invites (~1 min apart) for up to 10 minutes.
+       If limit triggers mid-window, spend remaining time in Feed Scraper.
+    3. If limit reached -> run 10-minute Feed Scraper (post-body emails + job links/forms, ignoring comments).
+    """
+    deadline = time.time() + (window_minutes * 60.0)
+    print("[ConnectionLimitCheck] Testing if LinkedIn weekly connection limit allows new invites...")
+
+    res = discover_and_send_poc_invitation(page, context, conn)
+    if res is True:
+        sent_invites = 1
+        send_discord_cycle_note(
+            "🎉 **Stage B — Connection Limit Check: ALLOWED!**\n"
+            "• Invitation #1 sent successfully.\n"
+            f"• Continuing paced connection invites (~1 min gap) for the {int(window_minutes)}-minute window."
+        )
+        while time.time() < deadline - 45:
+            time.sleep(random.uniform(55, 68))
+            if time.time() >= deadline:
+                break
+            r = discover_and_send_poc_invitation(page, context, conn)
+            if r is True:
+                sent_invites += 1
+            elif r == "LIMIT_REACHED":
+                print(f"[ConnectionLimitCheck] Limit reached after {sent_invites} invite(s). Switching remaining time to Feed Hunt.")
+                break
+            else:
+                # Could not find a Connect button in that search; pause briefly and retry
+                time.sleep(10)
+
+        remaining_mins = (deadline - time.time()) / 60.0
+        if remaining_mins >= 1.5:
+            print(f"[InterBatch:Branch] {remaining_mins:.1f}m left in 10-min slot -> switching to Feed Hunt...")
+            run_feed_scan_stage(conn=conn, duration_minutes=remaining_mins)
+    else:
+        reason_str = "Weekly invitation limit active" if res == "LIMIT_REACHED" else "Connection limit / no open invite slot"
+        print(f"[ConnectionLimitCheck] {reason_str} -> Switching to {window_minutes:.0f}-minute Feed & Post Email Hunt (post body only, no comments)...")
+        send_discord_cycle_note(
+            f"🔄 **Stage B — {reason_str}**\n"
+            f"• Switching to **{int(window_minutes)}-minute LinkedIn Feed & Post Hunt** (extracting emails strictly from post bodies, ignoring comments, and queuing job links/forms)."
+        )
+        run_feed_scan_stage(conn=conn, duration_minutes=window_minutes)
+
+
+def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
+    """Executes sequentially (1 task at a time) after every 10-message batch:
+    1. Stage B (10 min): Connection Limit Check -> Send Connections for 10 min OR Scrape Feed (post body only) for 10 min.
+    2. Stage C (10 min): Apply in LinkedIn Jobs section for 10 minutes (strict receipt verification).
+    3. Quick acceptance check before starting next 10-message batch.
     """
     print("\n" + "="*70)
-    print("🔄 INTER-BATCH ACTIVATION: Connection Renewal Check + 10-min Feed Scrape + 10-min Job Apply")
+    print(f"🔄 BATCH #{batch_num} COMPLETE -> STARTING SEQUENTIAL STAGE B (10m) & STAGE C (10m)")
     print("="*70)
 
-    # 1. Connection Request & Renewal Test
-    print("[InterBatch:Connect] Testing connection invitation for weekly renewal...")
-    test_and_send_connection_requests(page, context, conn)
+    # Stage B: Connection Limit Check -> 10m Connections OR 10m Feed Scrape (post bodies only)
+    run_connection_or_feed_branch(page, context, conn, window_minutes=10.0)
 
-    # 2. Feed Scraping for ~10 minutes
-    print("[InterBatch:Feed] Scanning personal feed for fresh hiring posts & direct emails...")
-    try:
-        run_feed_scan_stage()
-    except Exception as fse:
-        print(f"[InterBatch:Feed] Note: {fse}")
-
-    # 3. LinkedIn Jobs Section Application for ~10 minutes
-    print("[InterBatch:Jobs] Applying to matching jobs in LinkedIn Jobs section for 10 minutes...")
+    # Stage C: LinkedIn Jobs Section Application for 10 minutes
+    print("[InterBatch:Jobs] Stage C -> Applying in LinkedIn Jobs section for 10 minutes (strict confirmation only)...")
+    send_discord_cycle_note(
+        "💼 **Stage C — LinkedIn Jobs Section (10-Minute Window)**\n"
+        "• Applying sequentially to matching APM / Product / Business Analyst roles (verified post-submit confirmations only)."
+    )
     try:
         from src.agents.linkedin_job_applicant import apply_linkedin_jobs_stage
-        apply_linkedin_jobs_stage(duration_minutes=10, max_apps=6)
+        applied_jobs = apply_linkedin_jobs_stage(duration_minutes=10, max_apps=8)
+        print(f"[InterBatch:Jobs] Stage C finished: {applied_jobs} strictly confirmed LinkedIn Easy Apply submission(s).")
     except Exception as jae:
         print(f"[InterBatch:Jobs] Note: {jae}")
 
+    # Check if any previously invited POCs accepted before starting next 10-msg batch
+    try:
+        new_accepts = check_and_message_accepted_connections(page, conn)
+        if new_accepts > 0:
+            print(f"[InterBatch:Accepts] 🎯 Pitched {new_accepts} newly accepted connection(s)!")
+    except Exception:
+        pass
+
     print("="*70)
-    print("✅ Inter-batch activities complete. Resuming next 10-message batch!")
+    print(f"✅ Cycle #{batch_num} complete. Looping back to Stage A (Next 10-Message Batch, 1-min gap)!")
     print("="*70 + "\n")
+    send_discord_cycle_note(
+        f"🔁 **Cycle #{batch_num} Complete** — Restarting **Stage A: Next 10 LinkedIn Messages (1-min gap)**."
+    )
 
 # -------------------------------------------------------------
-# MASTER CONTINUOUS CYCLE (SAFE HUMAN PACING & MULTI-CHANNEL AUTOMATION)
+# MASTER CONTINUOUS CYCLE (1 TASK AT A TIME SEQUENTIAL LOOP)
 # -------------------------------------------------------------
 IST = timezone(timedelta(hours=5, minutes=30))
-DAILY_MAX_1ST_DEGREE = 80       # Paced safely across the day
-SESSION_MAX_1ST_DEGREE = 80     # Runs in continuous 10-message batches with 10-min feed scrape & 10-min job apply
-DAILY_MAX_POC_REQUESTS = 0      # Disabled: weekly connection invitation limit reached per user directive
+DAILY_MAX_1ST_DEGREE = 80       # Paced safely across the day (8 full 10-msg cycles/day)
 
 # LinkedIn Temporary Suspension Cooldown (12 Nov 10:37 AM PST = 13 Nov 00:07 AM IST)
 LINKEDIN_SUSPEND_UNTIL = datetime(2026, 11, 13, 0, 7, 0, tzinfo=IST)
@@ -672,15 +762,16 @@ def run_master_cycle(interval_minutes: int = 1):
     conn = sqlite3.connect(DB_PATH)
 
     print("\n" + "="*80)
-    print("🚀 MASTER AUTONOMOUS CYCLE: SAFE MULTI-CHANNEL ENGINE")
-    print("Operating Window: 10:00 AM - 11:00 PM IST (Active Evening Coverage)")
-    print(f"Pacing: 55-75s delay | Target: up to {DAILY_MAX_1ST_DEGREE} 1st-Degree / Day | POC Reqs: {DAILY_MAX_POC_REQUESTS} / Day")
-    print("Multi-Channel: 1st-Degree LinkedIn + 2nd-Degree POCs + Naukri/ATS + Feed Scanner")
+    print("🚀 LINKEDIN 1-TASK-AT-A-TIME SEQUENTIAL MASTER CYCLE")
+    print("Operating Window: 10:00 AM - 11:00 PM IST")
+    print("Cycle: [Stage A] 10 Msgs (1-min gap) -> [Stage B] 10m Connections OR Feed Hunt (post body only) -> [Stage C] 10m LinkedIn Jobs -> Repeat")
     print("="*80 + "\n")
 
     with sync_playwright() as p:
         iteration_count = 0
         messages_sent_session = 0
+        batch_msg_count = 0
+        batch_num = 1
         browser = None
         context = None
         page = None
@@ -694,7 +785,7 @@ def run_master_cycle(interval_minutes: int = 1):
                     now_str = now_ist.strftime('%I:%M %p IST')
                     if now_ist < LINKEDIN_SUSPEND_UNTIL:
                         until_str = LINKEDIN_SUSPEND_UNTIL.strftime('%I:%M %p IST (%d %b)')
-                        print(f"[Cycle:Suspension] LinkedIn temporarily suspended until {until_str} (10:37 AM PST). Current: {now_str}. Sleeping safely...")
+                        print(f"[Cycle:Suspension] LinkedIn temporarily suspended until {until_str}. Current: {now_str}. Sleeping safely...")
                     else:
                         print(f"[Cycle:Schedule] Current time {now_str} is outside 10:00 AM - 11:00 PM IST window. Resting safely...")
                     time.sleep(60)
@@ -712,7 +803,7 @@ def run_master_cycle(interval_minutes: int = 1):
                 # Auth Check: Ensure LinkedIn is logged in
                 if page and ("login" in page.url.lower() or "checkpoint" in page.url.lower()):
                     now_str = now_ist.strftime('%I:%M %p IST')
-                    print(f"[Cycle:Auth | {now_str}] ⚠️ LinkedIn session requires login (Current URL: {page.url}). Please open http://127.0.0.1:8083 in browser to log in. Resting 60s...")
+                    print(f"[Cycle:Auth | {now_str}] ⚠️ LinkedIn session requires login (Current URL: {page.url}). Resting 60s...")
                     time.sleep(60)
                     continue
 
@@ -726,29 +817,18 @@ def run_master_cycle(interval_minutes: int = 1):
                 ''')
                 daily_1st_sent = cur.fetchone()[0]
 
-                cur.execute('''
-                    SELECT count(*) FROM poc_connection_requests 
-                    WHERE date(requested_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
-                ''')
-                daily_poc_req = cur.fetchone()[0]
-
                 cur.execute("SELECT count(*) FROM linkedin_connections_queue WHERE status='pending'")
                 queue_pending = cur.fetchone()[0]
 
                 now_fmt = now_ist.strftime('%I:%M %p IST')
-                print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Today 1st-Degree: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Today POC Reqs: {daily_poc_req}/{DAILY_MAX_POC_REQUESTS} | Queue: {queue_pending}")
+                print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/10) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
-                # STAGE 0: Queue Check & Auto-Refill if low
-                if queue_pending < 30:
+                # STAGE 0: Queue Check & Auto-Refill if low (only between batches or when critically low)
+                if queue_pending < 15:
                     refill_connections_queue(page, conn, min_needed=40, max_scrolls=60)
 
-                # STAGE 1: Check Accepted Requests from previous invitations & pitch them
-                new_accepts = check_and_message_accepted_connections(page, conn)
-                if new_accepts > 0:
-                    print(f"[Cycle] 🎯 Pitched {new_accepts} newly accepted connection(s)!")
-
-                # STAGE 2: 1st-Degree Messaging (Dedicated Single-Task Mode: NO jumping between tabs)
-                if messages_sent_session < SESSION_MAX_1ST_DEGREE:
+                # STAGE A: 1st-Degree Messaging (10 messages at 1-minute gap, strictly 1 task at a time)
+                if daily_1st_sent < DAILY_MAX_1ST_DEGREE:
                     cur.execute('''
                         SELECT id, name, headline FROM linkedin_connections_queue 
                         WHERE status='pending' 
@@ -759,7 +839,7 @@ def run_master_cycle(interval_minutes: int = 1):
                     if row:
                         username, name, headline = row
                         first_name = name.split()[0] if name else "there"
-                        print(f"[Cycle:1stDegree] Pitching with updated CV ({messages_sent_session + 1}/{SESSION_MAX_1ST_DEGREE}): {name} ({headline[:40]}...)")
+                        print(f"[Cycle:StageA] Batch #{batch_num} Msg {batch_msg_count + 1}/10 -> {name} ({headline[:40]}...)")
                         success = turbo_send_1st_degree(page, username, first_name)
                         if success:
                             cur.execute('''
@@ -769,58 +849,39 @@ def run_master_cycle(interval_minutes: int = 1):
                             cur.execute("UPDATE linkedin_connections_queue SET status='sent' WHERE id=?", (username,))
                             conn.commit()
                             messages_sent_session += 1
+                            batch_msg_count += 1
 
-                            # Fast safe cadence: ~1 minute delay (55s - 75s)
-                            delay_s = random.uniform(55, 75)
-                            print(f"[Cycle:1stDegree] 1-minute pacing delay: resting {int(delay_s)}s before next message...")
-                            time.sleep(delay_s)
+                            if messages_sent_session == 1 or batch_msg_count in (1, 10):
+                                send_discord_cycle_note(
+                                    f"📨 **Stage A — LinkedIn Message Sent ({batch_msg_count}/10 in Batch #{batch_num})**\n"
+                                    f"• Recipient: **{name}** (`{username}`)\n"
+                                    f"• Attachment: CV PDF + Drive Link | Verified composer cleared ✅"
+                                )
 
-                            # Every 10 messages, run inter-batch activities (Portals -> POCs -> Feed)
-                            if messages_sent_session % 10 == 0:
-                                print(f"[Cycle:1stDegree] Completed 10-message batch ({messages_sent_session} sent)! Launching inter-batch activities (Portals + POC Invites + Feed Scan)...")
-                                run_inter_batch_activities(page, context, conn, max_pocs=4)
+                            if batch_msg_count >= 10:
+                                print(f"[Cycle:StageA] Completed 10/10 messages in Batch #{batch_num}! Moving to Stage B & Stage C...")
+                                run_inter_batch_activities(page, context, conn, batch_num=batch_num)
+                                batch_msg_count = 0
+                                batch_num += 1
+                            else:
+                                delay_s = random.uniform(55, 68)
+                                print(f"[Cycle:StageA] 1-minute gap: resting {int(delay_s)}s before Message {batch_msg_count + 1}/10...")
+                                time.sleep(delay_s)
                         else:
                             cur.execute("UPDATE linkedin_connections_queue SET status='skipped' WHERE id=?", (username,))
                             conn.commit()
-                            time.sleep(3)
-                        
-                        # CRITICAL: Do NOT jump to other LinkedIn tasks while messaging! Stay focused on messaging.
+                            time.sleep(2)
+                        continue
+                    else:
+                        print("[Cycle:StageA] Queue empty after refill attempt; running Stage B & Stage C directly...")
+                        run_inter_batch_activities(page, context, conn, batch_num=batch_num)
+                        batch_num += 1
                         continue
                 else:
-                    print(f"[Cycle:1stDegree] Session quota of {SESSION_MAX_1ST_DEGREE} reached for this afternoon.")
-
-                # STAGE 3: 2nd-Degree POC Connection Requests (Disabled: weekly limit reached)
-                # if daily_poc_req < DAILY_MAX_POC_REQUESTS:
-                #     ...
-
-                # STAGE 4: Direct Email Scraper (Disabled to prevent multi-tasking / overlays)
-                # if iteration_count % 4 == 0:
-                #     try:
-                #         scraper_script = str(PROJECT_ROOT / "scripts" / "scrape_connection_emails.py")
-                #         subprocess.run([sys.executable, scraper_script, "5"], timeout=180)
-                #     except Exception as sce:
-                #         pass
-
-                # STAGE 5: Portal Auto-Apply (Naukri + ATS redirects for Indeed & LinkedIn)
-                if iteration_count % 5 == 0:
-                    try:
-                        run_portal_apply_stage(conn, max_naukri=2, max_redirects=2)
-                    except Exception as pae:
-                        print(f"[Cycle:Portals] Portal apply note: {pae}")
-
-                # STAGE 6: Personal Feed Scan (LinkedIn Feed Scraper)
-                if iteration_count % 8 == 0:
-                    try:
-                        run_feed_scan_stage()
-                    except Exception as fse:
-                        print(f"[Cycle:Feed] Feed scan note: {fse}")
-
-                # STAGE 7: Periodic 48h Follow-up Check (Disabled per user directive)
-                # if iteration_count % 12 == 0:
-                #     run_followup_cycle(page, conn, max_followups=2)
-
-                # Light interval between cycle iterations
-                time.sleep(5)
+                    print(f"[Cycle:StageA] Daily safe cap ({DAILY_MAX_1ST_DEGREE}) reached for 1st-degree messages. Continuing Stage B (Feed Hunt) + Stage C (Jobs) loop...")
+                    run_inter_batch_activities(page, context, conn, batch_num=batch_num)
+                    batch_num += 1
+                    continue
 
             except Exception as iter_e:
                 print(f"[Cycle:Error] Iteration error caught: {iter_e}")

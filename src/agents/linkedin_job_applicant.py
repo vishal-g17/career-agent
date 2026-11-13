@@ -113,19 +113,28 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
                             for step_i in range(8):
                                 time.sleep(1.5)
 
-                                # 1. Check submit button
+                                # 1. Check submit button & STRICTLY confirm 'Application sent'
                                 submit_btn = modal.locator('button:has-text("Submit application"), button:has-text("Submit")').first
                                 if submit_btn.is_visible(timeout=1000):
                                     submit_btn.click()
-                                    time.sleep(3)
+                                    time.sleep(3.5)
+
+                                    body_lower = page.locator("body").inner_text().lower()
+                                    has_err = modal.locator('.artdeco-inline-feedback--error:visible').count() > 0
+                                    if has_err or not any(
+                                        p in body_lower for p in ["application sent", "your application was sent", "application submitted"]
+                                    ):
+                                        print(f"[LinkedInJobs] ⚠️ Submit clicked for {title} @ {comp}, but 'Application sent' NOT confirmed. Skipping fake mark.")
+                                        break
+
                                     applied_count += 1
                                     step_submitted = True
-                                    print(f"[LinkedInJobs] ✅ Applied successfully to: {title} @ {comp} ({applied_count}/{max_apps})!")
+                                    print(f"[LinkedInJobs] ✅ Applied & CONFIRMED: {title} @ {comp} ({applied_count}/{max_apps})!")
                                     
                                     # Insert/update DB
                                     cur.execute('''
-                                        INSERT OR REPLACE INTO jobs (id, title, company, location, url, status, created_at)
-                                        VALUES (?, ?, ?, ?, ?, 'applied', CURRENT_TIMESTAMP)
+                                        INSERT OR REPLACE INTO jobs (id, title, company, location, url, status, scorecard, created_at)
+                                        VALUES (?, ?, ?, ?, ?, 'applied', json_object('applied_via', 'linkedin_easy_apply', 'applied_at', CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)
                                     ''', (f"li_{int(time.time())}", title, comp, "India", job_url))
                                     conn.commit()
 
@@ -135,10 +144,10 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
                                         DiscordNotifier().send_application_alert({
                                             "company": comp,
                                             "role": title,
-                                            "platform": "LinkedIn (Easy Apply)",
+                                            "platform": "LinkedIn (Easy Apply — Verified)",
                                             "url": job_url,
                                             "status": "SUBMITTED & CONFIRMED",
-                                            "details": "Screening questions answered (15d notice, 12 LPA, 1yr exp), attached Vishal_Gupta_Resume.pdf.",
+                                            "details": "Verified 'Application sent' confirmation screen. Attached Vishal_Gupta_Resume.pdf.",
                                             "resume": "Vishal_Gupta_Resume.pdf"
                                         })
                                     except Exception as ne:
