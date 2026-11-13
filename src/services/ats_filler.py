@@ -360,6 +360,7 @@ def fill_ats_application(
     url: str,
     role_title: str = "Associate Product Manager",
     auto_submit: bool = True,
+    shared_browser: Any = None,
 ) -> Dict[str, Any]:
     """
     Autofills external company career pages hosted on Greenhouse, Ashby, Lever,
@@ -398,20 +399,27 @@ def fill_ats_application(
 
     print(f"\n[ATSFiller] Processing application for: {role_title} ({url})")
 
-    with sync_playwright() as p_play:
+    from contextlib import nullcontext
+
+    owns_browser = shared_browser is None
+    pw_cm = sync_playwright() if owns_browser else nullcontext(None)
+
+    with pw_cm as p_play:
         target_page = None
-        browser = None
+        context = None
+        browser = shared_browser
         try:
-            launch_args = [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ]
-            try:
-                browser = p_play.chromium.launch(headless=True, args=launch_args)
-            except Exception:
-                browser = p_play.chromium.launch(channel="chrome", headless=True, args=launch_args)
+            if owns_browser:
+                launch_args = [
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                ]
+                try:
+                    browser = p_play.chromium.launch(headless=True, args=launch_args)
+                except Exception:
+                    browser = p_play.chromium.launch(channel="chrome", headless=True, args=launch_args)
 
             context = browser.new_context(
                 user_agent=(
@@ -438,8 +446,8 @@ def fill_ats_application(
             page = context.new_page()
             target_page = page
 
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+            page.goto(url, wait_until="domcontentloaded", timeout=22000)
+            page.wait_for_timeout(1400)
 
             # --- Follow portal redirects (Indeed, Naukri, LinkedIn) if needed ---
             current_url = page.url
@@ -1159,7 +1167,12 @@ def fill_ats_application(
                     target_page.close()
                 except Exception:
                     pass
-            if browser:
+            if context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+            if owns_browser and browser:
                 try:
                     browser.close()
                 except Exception:

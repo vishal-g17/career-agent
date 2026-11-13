@@ -1,56 +1,75 @@
-import sys
 import os
-import time
 import sqlite3
+import sys
+import time
 from pathlib import Path
+from playwright.sync_api import sync_playwright
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.services.ats_filler import fill_ats_application
 from src.engine.discord_client import DiscordClient
-from src import config
+from src.services.ats_filler import fill_ats_application
 
-DB_PATH = os.environ.get("DATABASE_PATH") or os.path.expanduser('~/.linkedin_agent.db')
+DB_PATH = os.environ.get("DATABASE_PATH") or os.path.expanduser("~/.linkedin_agent.db")
 if not os.path.exists(DB_PATH):
     DB_PATH = str(PROJECT_ROOT / ".linkedin_agent.db")
 if not os.path.exists(DB_PATH):
     DB_PATH = str(PROJECT_ROOT / "agent.db")
 
-def process_redirects(max_jobs: int = 15):
-    conn = sqlite3.connect(DB_PATH)
+
+def process_redirects(max_jobs: int = 20):
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
     cur = conn.cursor()
 
-    cur.execute('''
-        SELECT id, title, company, url 
-        FROM jobs 
+    # Mark datacenter-login-walled raw indeed.com viewjob links as pending review immediately
+    # so the headless worker never wastes 80s/job on Indeed's login redirect
+    cur.execute(
+        """
+        UPDATE jobs
+        SET status = 'external_pending_review'
+        WHERE status IN ('new', 'external_redirect')
+          AND url LIKE '%indeed.com%'
+        """
+    )
+    conn.commit()
+
+    cur.execute(
+        """
+        SELECT id, title, company, url
+        FROM jobs
         WHERE (
             status = 'external_redirect'
             OR (
                 status = 'new'
                 AND url NOT LIKE '%naukri.com%'
                 AND url NOT LIKE '%linkedin.com%'
+                AND url NOT LIKE '%indeed.com%'
                 AND COALESCE(match_score, 80) >= 70
             )
         )
-        ORDER BY 
-            CASE 
+        AND url NOT LIKE '%indeed.com%'
+        ORDER BY
+            CASE
                 WHEN url LIKE '%greenhouse.io%' THEN 0
-                WHEN url NOT LIKE '%indeed.com%' AND url NOT LIKE '%naukri.com%' THEN 1
+                WHEN url LIKE '%lever.co%' OR url LIKE '%ashbyhq.com%' THEN 1
                 ELSE 2
             END ASC,
-            created_at DESC 
+            created_at DESC
         LIMIT ?
-    ''', (max_jobs,))
+        """,
+        (max_jobs,),
+    )
     jobs = cur.fetchall()
 
     if not jobs:
-        print("[ATSProcessor] No pending external_redirect jobs in queue.")
-        return
+        conn.close()
+        print("[ATSProcessor] No pending direct external ATS jobs in queue.")
+        return 0
 
-    print(f"\n=======================================================")
-    print(f"[ATSProcessor] Starting Automated ATS Applications for {len(jobs)} Jobs")
-    print(f"=======================================================\n")
+    print("\n=======================================================")
+    print(f"[ATSProcessor] Turbo Shared-Browser Batch: Processing {len(jobs)} Direct ATS Jobs")
+    print("=======================================================\n")
 
     discord = None
     try:
@@ -61,65 +80,91 @@ def process_redirects(max_jobs: int = 15):
     success_count = 0
     skipped_count = 0
 
-    for idx, (jid, title, comp, url) in enumerate(jobs, 1):
-        print(f"\n[{idx}/{len(jobs)}] Processing: {title} @ {comp}")
-        print(f"URL: {url}")
+    launch_args = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+    ]
+
+    with sync_playwright() as p_play:
+        try:
+            browser = p_play.chromium.launch(headless=True, args=launch_args)
+        except Exception:
+            browser = p_play.chromium.launch(channel="chrome", headless=True, args=launch_args)
 
         try:
-            res = fill_ats_application(url, role_title=f"{title} @ {comp}", auto_submit=True)
-            
-            # STRICT VERIFICATION: ONLY mark applied if final submit succeeded AND page confirmed receipt
-            if res.get("submitted") and res.get("confirmed"):
-                success_count += 1
-                cur.execute('''
-                    UPDATE jobs 
-                    SET status = 'applied',
-                        scorecard = json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'ats_autofill', '$.ats_type', ?, '$.applied_at', CURRENT_TIMESTAMP)
-                    WHERE id = ?
-                ''', (res.get("ats_type", "external_ats"), jid))
-                conn.commit()
-                print(f"[ATSProcessor] -> SUCCESS: Applied to {title} @ {comp} ({res.get('ats_type')})!")
+            for idx, (jid, title, comp, url) in enumerate(jobs, 1):
+                print(f"\n[{idx}/{len(jobs)}] Processing: {title} @ {comp}")
+                print(f"URL: {url}")
 
-                if discord:
-                    try:
-                        from src.agents.discord_notifier import DiscordNotifier
-                        DiscordNotifier().send_application_alert({
-                            "company": comp,
-                            "role": title,
-                            "platform": f"External ATS ({res.get('ats_type', 'Company Portal').upper()})",
-                            "url": res.get('ats_url', url),
-                            "status": "SUBMITTED & CONFIRMED" if res.get("confirmed") else "SUBMITTED",
-                            "details": "Screening: Automated (1 yr exp, 15-day immediate notice, no employer leak), uploaded ATS resume.",
-                            "resume": "Vishal_Gupta_Resume.pdf"
-                        })
-                    except Exception as me:
-                        print(f"[ATSProcessor] Discord send notice: {me}")
-            elif res.get("error") == "expired":
-                cur.execute("UPDATE jobs SET status = 'expired' WHERE id = ?", (jid,))
-                conn.commit()
-                print(f"[ATSProcessor] -> Job listing expired. Marked as expired.")
-                skipped_count += 1
-            elif res.get("error") and "ERR_HTTP_RESPONSE_CODE_FAILURE" in res["error"]:
-                print(f"[ATSProcessor] -> LinkedIn 429 throttle encountered. Skipping to next...")
-                skipped_count += 1
-            else:
-                skipped_count += 1
-                # Mark failed after trying so other pending jobs can proceed
-                cur.execute("UPDATE jobs SET status = 'external_pending_review' WHERE id = ?", (jid,))
-                conn.commit()
-                print(f"[ATSProcessor] -> Could not auto-submit (portal redirect or expired): {res.get('error')}")
+                try:
+                    res = fill_ats_application(
+                        url,
+                        role_title=f"{title} @ {comp}",
+                        auto_submit=True,
+                        shared_browser=browser,
+                    )
 
-        except Exception as e:
-            skipped_count += 1
-            print(f"[ATSProcessor] Error on {title}: {e}")
+                    if res.get("submitted") and res.get("confirmed"):
+                        success_count += 1
+                        cur.execute(
+                            """
+                            UPDATE jobs
+                            SET status = 'applied',
+                                scorecard = json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'ats_autofill', '$.ats_type', ?, '$.applied_at', CURRENT_TIMESTAMP)
+                            WHERE id = ?
+                            """,
+                            (res.get("ats_type", "external_ats"), jid),
+                        )
+                        conn.commit()
+                        print(f"[ATSProcessor] -> SUCCESS: Applied to {title} @ {comp} ({res.get('ats_type')})!")
 
-        time.sleep(5)
+                        if discord:
+                            try:
+                                from src.agents.discord_notifier import DiscordNotifier
+                                DiscordNotifier().send_application_alert(
+                                    {
+                                        "company": comp,
+                                        "role": title,
+                                        "platform": f"External ATS ({res.get('ats_type', 'Company Portal').upper()})",
+                                        "url": res.get("ats_url", url),
+                                        "status": "SUBMITTED & CONFIRMED",
+                                        "details": "Screening: Automated (1 yr exp, 15-day immediate notice, clean profile), uploaded ATS resume.",
+                                        "resume": "Vishal_Gupta_Resume.pdf",
+                                    }
+                                )
+                            except Exception as me:
+                                print(f"[ATSProcessor] Discord send notice: {me}")
+                    elif res.get("error") == "expired":
+                        cur.execute("UPDATE jobs SET status = 'expired' WHERE id = ?", (jid,))
+                        conn.commit()
+                        skipped_count += 1
+                    else:
+                        skipped_count += 1
+                        cur.execute("UPDATE jobs SET status = 'external_pending_review' WHERE id = ?", (jid,))
+                        conn.commit()
+                        print(f"[ATSProcessor] -> Skipped ({res.get('error')})")
+                except Exception as e:
+                    skipped_count += 1
+                    cur.execute("UPDATE jobs SET status = 'external_pending_review' WHERE id = ?", (jid,))
+                    conn.commit()
+                    print(f"[ATSProcessor] Error on {title}: {e}")
+
+                time.sleep(0.8)
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     conn.close()
-    print(f"\n=======================================================")
-    print(f"[ATSProcessor] Batch Complete! Submitted: {success_count}, Skipped/Pending: {skipped_count}")
-    print(f"=======================================================\n")
+    print("\n=======================================================")
+    print(f"[ATSProcessor] Turbo Batch Complete! Submitted: {success_count}, Skipped/Review: {skipped_count}")
+    print("=======================================================\n")
+    return success_count
+
 
 if __name__ == "__main__":
-    count = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+    count = int(sys.argv[1]) if len(sys.argv) > 1 else 20
     process_redirects(max_jobs=count)
