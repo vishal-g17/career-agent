@@ -106,30 +106,86 @@ def is_excluded(name: str = "", headline: str = "", card_text: str = "") -> str:
     return ""
 
 _BOUNCED_CACHE = None
+_BOUNCED_CACHE_TS = 0.0
 
-def is_bounced_or_discarded(email_addr: str) -> bool:
+
+def ensure_blocklist_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bounced_blocklist (
+            email TEXT PRIMARY KEY,
+            reason TEXT,
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
+
+def record_bounced_email(email_addr: str, reason: str = "Bounce / Invalid Mailbox") -> bool:
     """
-    Returns True if an email is in the discarded / bounced list and must NEVER be contacted again.
+    Records a bounced/discarded email in internal bounced_blocklist (so we never re-send)
+    AND deletes it completely from active outreach_leads data.
+    Returns True if a row was deleted from outreach_leads.
     """
     global _BOUNCED_CACHE
     if not email_addr:
         return False
-        
     clean_email = email_addr.strip().lower()
-    if _BOUNCED_CACHE is None:
+    deleted = False
+    try:
+        import os
+        import sqlite3
+        from pathlib import Path
+        db_file = Path(os.environ.get("DATABASE_PATH", str(Path.home() / ".linkedin_agent.db")))
+        conn = sqlite3.connect(str(db_file), timeout=30.0)
+        ensure_blocklist_table(conn)
+        conn.execute(
+            "INSERT OR REPLACE INTO bounced_blocklist (email, reason, detected_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (clean_email, reason),
+        )
+        cur = conn.execute("DELETE FROM outreach_leads WHERE LOWER(TRIM(email)) = ?", (clean_email,))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        if _BOUNCED_CACHE is not None:
+            _BOUNCED_CACHE.add(clean_email)
+    except Exception as e:
+        print(f"[ExclusionFilter] Error recording/deleting bounce {clean_email}: {e}")
+    return deleted
+
+
+def is_bounced_or_discarded(email_addr: str) -> bool:
+    """
+    Returns True if an email is in the internal bounced_blocklist and must NEVER be contacted again.
+    Refreshes cache every 30s so newly caught IMAP bounces take effect immediately.
+    """
+    global _BOUNCED_CACHE, _BOUNCED_CACHE_TS
+    if not email_addr:
+        return False
+
+    import time
+    clean_email = email_addr.strip().lower()
+    now = time.time()
+    if _BOUNCED_CACHE is None or (now - _BOUNCED_CACHE_TS) > 30.0:
         try:
+            import os
             import sqlite3
             from pathlib import Path
-            db_file = Path.home() / '.linkedin_agent.db'
+            db_file = Path(os.environ.get("DATABASE_PATH", str(Path.home() / ".linkedin_agent.db")))
             if db_file.exists():
-                conn = sqlite3.connect(db_file)
-                c = conn.cursor()
-                c.execute("SELECT lower(email) FROM outreach_leads WHERE status IN ('bounced', 'excluded')")
-                _BOUNCED_CACHE = set(r[0] for r in c.fetchall())
+                conn = sqlite3.connect(str(db_file), timeout=15.0)
+                ensure_blocklist_table(conn)
+                rows1 = conn.execute("SELECT LOWER(TRIM(email)) FROM bounced_blocklist WHERE email IS NOT NULL").fetchall()
+                rows2 = conn.execute(
+                    "SELECT LOWER(TRIM(email)) FROM outreach_leads WHERE status IN ('bounced', 'excluded') AND email IS NOT NULL"
+                ).fetchall()
                 conn.close()
+                _BOUNCED_CACHE = {r[0] for r in rows1 if r[0]} | {r[0] for r in rows2 if r[0]}
             else:
                 _BOUNCED_CACHE = set()
+            _BOUNCED_CACHE_TS = now
         except Exception:
-            _BOUNCED_CACHE = set()
-            
+            if _BOUNCED_CACHE is None:
+                _BOUNCED_CACHE = set()
+
     return clean_email in _BOUNCED_CACHE

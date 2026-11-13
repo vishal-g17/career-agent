@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from .cold_mailer import compose_cold_email, send_cold_email_smtp, get_sender_credentials
 from .email_verifier import verify_email
-from .exclusion_filter import is_excluded, is_bounced_or_discarded
+from .exclusion_filter import is_excluded, is_bounced_or_discarded, record_bounced_email
 from ..db import database
 from ..agents.discord_notifier import DiscordNotifier
 from .. import config
@@ -106,16 +106,14 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
         company = lead["company"] or "Your Team"
 
         if is_bounced_or_discarded(email_addr):
-            print(f"[OutreachCampaign] [DISCARDED_BOUNCE] Permanently skipping {name} ({company}, {email_addr})")
-            with database.get_connection() as c:
-                c.execute("UPDATE outreach_leads SET status = 'bounced' WHERE id = ?", (lead_id,))
+            print(f"[OutreachCampaign] [DISCARDED_BOUNCE] Deleting bounced lead {name} ({company}, {email_addr})")
+            record_bounced_email(email_addr, "Pre-known bounce")
             continue
 
         exclusion = is_excluded(name=name, headline=f"{company} {email_addr}")
         if exclusion:
-            print(f"[OutreachCampaign] [EXCLUDED {exclusion}] Skipping {name} ({company}, {email_addr})")
-            with database.get_connection() as c:
-                c.execute("UPDATE outreach_leads SET status = 'excluded' WHERE id = ?", (lead_id,))
+            print(f"[OutreachCampaign] [EXCLUDED {exclusion}] Deleting excluded lead {name} ({company}, {email_addr})")
+            record_bounced_email(email_addr, f"Excluded: {exclusion}")
             continue
 
         clean_leads.append(dict(lead))
@@ -193,9 +191,22 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
                         today_counts[sender_addr.lower()] = today_counts.get(sender_addr.lower(), 0) + 1
                         status_str = f"sent via {sender_addr} ({today_counts[sender_addr.lower()]}/{cap_cur} today)"
                     else:
-                        c.execute("UPDATE outreach_leads SET status = 'bounced' WHERE id = ?", (l_id,))
+                        c.execute(
+                            """
+                            CREATE TABLE IF NOT EXISTS bounced_blocklist (
+                                email TEXT PRIMARY KEY,
+                                reason TEXT,
+                                detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                            """
+                        )
+                        c.execute(
+                            "INSERT OR REPLACE INTO bounced_blocklist (email, reason, detected_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                            (l_email.strip().lower(), "Pre-send MX / SMTP bounce"),
+                        )
+                        c.execute("DELETE FROM outreach_leads WHERE id = ?", (l_id,))
                         counters["bounced"] += 1
-                        status_str = "bounced/blocked"
+                        status_str = "bounced_and_deleted"
 
                 results.append({
                     "name": l_name,

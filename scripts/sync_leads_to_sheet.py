@@ -1,60 +1,99 @@
-import sqlite3
-import os
 import csv
+import json
+import os
+import sqlite3
 from pathlib import Path
-from datetime import datetime
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-DB_PATH = Path.home() / '.linkedin_agent.db'
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / 'data'
-OUTPUT_XLSX = OUTPUT_DIR / 'MASTER_LEADS_SHEET.xlsx'
-OUTPUT_ACTIVE_CSV = OUTPUT_DIR / 'ACTIVE_DELIVERED_LEADS.csv'
-OUTPUT_DISCARDED_CSV = OUTPUT_DIR / 'DISCARDED_BOUNCED_LEADS.csv'
+DB_PATH = Path(os.environ.get("DATABASE_PATH", str(Path.home() / ".linkedin_agent.db")))
+OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data"
+OUTPUT_XLSX = OUTPUT_DIR / "MASTER_LEADS_SHEET.xlsx"
+OUTPUT_WORKING_XLSX = OUTPUT_DIR / "WORKING_LEADS_MASTER.xlsx"
+OUTPUT_WORKING_CSV = OUTPUT_DIR / "WORKING_LEADS_MASTER.csv"
+OUTPUT_ACTIVE_CSV = OUTPUT_DIR / "ACTIVE_DELIVERED_LEADS.csv"
+OUTPUT_CLEAN_JSON = OUTPUT_DIR / "cleaned_recruiter_leads.json"
+LEGACY_DISCARDED_CSV = OUTPUT_DIR / "DISCARDED_BOUNCED_LEADS.csv"
+
 
 def export_split_leads():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(str(DB_PATH), timeout=60.0)
+    conn.row_factory = sqlite3.Row
     cur = conn.cursor()
 
-    # 1. Fetch Active & Delivered Leads (Sent, Pending, Replied)
-    cur.execute('''
-        SELECT id, name, email, company, role_target, status, first_sent_at, sender_email
-        FROM outreach_leads
-        WHERE status IN ('sent', 'replied', 'pending')
-        ORDER BY CASE status WHEN 'replied' THEN 1 WHEN 'sent' THEN 2 ELSE 3 END, first_sent_at DESC
-    ''')
-    active_rows = cur.fetchall()
+    # Ensure internal blocklist exists and purge ANY bounced/excluded rows from active outreach_leads
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bounced_blocklist (
+            email TEXT PRIMARY KEY,
+            reason TEXT,
+            detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    bad_rows = cur.execute(
+        "SELECT email, status FROM outreach_leads WHERE status IN ('bounced', 'excluded') AND email IS NOT NULL"
+    ).fetchall()
+    for br in bad_rows:
+        cur.execute(
+            "INSERT OR REPLACE INTO bounced_blocklist (email, reason, detected_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (br["email"].strip().lower(), f"Purged {br['status']}"),
+        )
+    cur.execute("DELETE FROM outreach_leads WHERE status IN ('bounced', 'excluded')")
+    cur.execute(
+        "DELETE FROM outreach_leads WHERE LOWER(TRIM(email)) IN (SELECT LOWER(TRIM(email)) FROM bounced_blocklist)"
+    )
+    conn.commit()
 
-    # 2. Fetch Discarded & Bounced Leads
-    cur.execute('''
-        SELECT id, name, email, company, role_target, status, last_sent_at, sender_email
-        FROM outreach_leads
-        WHERE status IN ('bounced', 'excluded')
-        ORDER BY last_sent_at DESC
-    ''')
-    discarded_rows = cur.fetchall()
+    # Fetch 100% clean Active & Delivered Leads ONLY
+    active_rows = [
+        dict(r)
+        for r in cur.execute(
+            """
+            SELECT *
+            FROM outreach_leads
+            WHERE status IN ('sent', 'replied', 'pending', 'unresponsive')
+            ORDER BY CASE status WHEN 'replied' THEN 1 WHEN 'sent' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END,
+                     COALESCE(last_sent_at, first_sent_at, '') DESC, id DESC
+            """
+        ).fetchall()
+    ]
+    blocklist_count = cur.execute("SELECT COUNT(*) FROM bounced_blocklist").fetchone()[0]
     conn.close()
 
-    print(f"[SheetSync] Processing {len(active_rows)} Active Leads and {len(discarded_rows)} Discarded/Bounced Leads...")
+    # Remove legacy discarded CSV so no bounced leads file remains in data/
+    if LEGACY_DISCARDED_CSV.exists():
+        try:
+            LEGACY_DISCARDED_CSV.unlink()
+        except OSError:
+            pass
 
+    print(f"[SheetSync] Exporting {len(active_rows)} clean Active Leads (0 bounced in data/sheets; {blocklist_count} permanently blocked internally)...")
+
+    # 1. MASTER_LEADS_SHEET.xlsx (Styled, 100% clean active leads only)
     wb = openpyxl.Workbook()
-    # Remove default sheet
-    wb.remove(wb.active)
+    ws_active = wb.active
+    ws_active.title = "Active & Delivered Leads"
 
-    border_side = Side(style='thin', color='DDDDDD')
+    border_side = Side(style="thin", color="DDDDDD")
     border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
     data_font = Font(name="Calibri", size=10)
-
-    # -------------------------------------------------------------
-    # TAB 1: ACTIVE & DELIVERED LEADS
-    # -------------------------------------------------------------
-    ws_active = wb.create_sheet(title="Active & Delivered Leads")
     header_fill_active = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
     header_font_active = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
 
-    headers_active = ["ID", "Full Name", "Corporate Email", "Company", "Target Role", "Status", "Sent Timestamp", "Sender Account", "Verification"]
+    headers_active = [
+        "ID",
+        "Full Name",
+        "Corporate Email",
+        "Company",
+        "Target Role",
+        "Status",
+        "Sent Timestamp",
+        "Sender Account",
+        "Verification",
+    ]
     ws_active.append(headers_active)
 
     for col_idx in range(1, len(headers_active) + 1):
@@ -63,17 +102,19 @@ def export_split_leads():
         cell.font = header_font_active
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    for r_idx, (lid, name, email, company, role, status, sent_at, sender) in enumerate(active_rows, start=2):
+    for r_idx, r in enumerate(active_rows, start=2):
+        status = (r.get("status") or "pending").lower()
+        sent_at = r.get("last_sent_at") or r.get("first_sent_at")
         row_data = [
-            lid,
-            name or "Hiring Team",
-            email,
-            company or "Tech Company",
-            role or "Product / Analytics",
+            r.get("id"),
+            r.get("name") or "Hiring Team",
+            r.get("email") or "",
+            r.get("company") or "Tech Company",
+            r.get("role_target") or "Associate Product Manager / Product & Business Analyst",
             status.upper(),
             str(sent_at)[:19] if sent_at else "Queued",
-            sender or "NSUT SMTP",
-            "Delivered (Verified MX)" if status in ('sent', 'replied') else "Pending Dispatch"
+            r.get("sender_email") or "Dual SMTP Queue",
+            "Delivered (Verified MX)" if status in ("sent", "replied", "unresponsive") else "Pending Dispatch",
         ]
         ws_active.append(row_data)
 
@@ -81,89 +122,120 @@ def export_split_leads():
             c = ws_active.cell(row=r_idx, column=c_idx)
             c.font = data_font
             c.border = border
-            if c_idx == 6: # Status
-                if status == 'replied':
+            if c_idx == 6:
+                if status == "replied":
                     c.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                     c.font = Font(name="Calibri", size=10, color="006100", bold=True)
-                elif status == 'sent':
+                elif status in ("sent", "unresponsive"):
                     c.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
                     c.font = Font(name="Calibri", size=10, color="276A3C", bold=True)
-                elif status == 'pending':
+                elif status == "pending":
                     c.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
                     c.font = Font(name="Calibri", size=10, color="8A6D3B", bold=True)
 
-    col_widths_active = [8, 26, 34, 22, 24, 16, 22, 28, 22]
+    col_widths_active = [8, 26, 34, 24, 34, 16, 22, 28, 24]
     for idx, width in enumerate(col_widths_active, start=1):
         ws_active.column_dimensions[get_column_letter(idx)].width = width
 
-    # -------------------------------------------------------------
-    # TAB 2: DISCARDED & BOUNCED LEADS (NEVER EMAIL AGAIN)
-    # -------------------------------------------------------------
-    ws_disc = wb.create_sheet(title="Discarded & Bounced")
-    header_fill_disc = PatternFill(start_color="C00000", end_color="C00000", fill_type="solid") # Strong Red
-    header_font_disc = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    tmp_xlsx = OUTPUT_DIR / ".MASTER_LEADS_SHEET.tmp.xlsx"
+    wb.save(tmp_xlsx)
+    os.replace(tmp_xlsx, OUTPUT_XLSX)
 
-    headers_disc = ["ID", "Full Name", "Bounced / Discarded Email", "Company", "Target Role", "Status", "Attempted Date", "Exclusion Reason"]
-    ws_disc.append(headers_disc)
-
-    for col_idx in range(1, len(headers_disc) + 1):
-        cell = ws_disc.cell(row=1, column=col_idx)
-        cell.fill = header_fill_disc
-        cell.font = header_font_disc
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-
-    for r_idx, (lid, name, email, company, role, status, last_sent, sender) in enumerate(discarded_rows, start=2):
-        row_data = [
-            lid,
-            name or "Professional",
-            email,
-            company or "Organization",
-            role or "Product / Analytics",
-            "DISCARDED (BOUNCED)" if status == 'bounced' else "EXCLUDED (STUDENT/JUNIOR)",
-            str(last_sent)[:19] if last_sent else "N/A",
-            "SMTP Bounce / Churned Inactive Mailbox - DO NOT RE-CONTACT"
-        ]
-        ws_disc.append(row_data)
-
-        for c_idx in range(1, len(row_data) + 1):
-            c = ws_disc.cell(row=r_idx, column=c_idx)
-            c.font = data_font
-            c.border = border
-            if c_idx == 6: # Status
-                c.fill = PatternFill(start_color="FCE4D6", end_color="FCE4D6", fill_type="solid")
-                c.font = Font(name="Calibri", size=10, color="C00000", bold=True)
-
-    col_widths_disc = [8, 26, 36, 22, 24, 26, 22, 45]
-    for idx, width in enumerate(col_widths_disc, start=1):
-        ws_disc.column_dimensions[get_column_letter(idx)].width = width
-
-    # Save Excel Workbook
-    wb.save(OUTPUT_XLSX)
-    print(f"[SheetSync] Excel workbook successfully saved to {OUTPUT_XLSX}")
-
-    # Export Active CSV
-    with open(OUTPUT_ACTIVE_CSV, 'w', newline='', encoding='utf-8') as f:
+    # 2. ACTIVE_DELIVERED_LEADS.csv
+    tmp_active_csv = OUTPUT_DIR / ".ACTIVE_DELIVERED_LEADS.tmp.csv"
+    with open(tmp_active_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(headers_active)
         for r in active_rows:
-            w.writerow([r[0], r[1] or "Hiring Team", r[2], r[3], r[4], r[5].upper(), r[6], r[7], "Delivered" if r[5] in ('sent', 'replied') else "Pending"])
-    print(f"[SheetSync] Clean active CSV exported to {OUTPUT_ACTIVE_CSV}")
+            st = (r.get("status") or "pending").lower()
+            sent_at = r.get("last_sent_at") or r.get("first_sent_at") or ""
+            w.writerow([
+                r.get("id"),
+                r.get("name") or "Hiring Team",
+                r.get("email") or "",
+                r.get("company") or "",
+                r.get("role_target") or "",
+                st.upper(),
+                sent_at,
+                r.get("sender_email") or "",
+                "Delivered" if st in ("sent", "replied", "unresponsive") else "Pending",
+            ])
+    os.replace(tmp_active_csv, OUTPUT_ACTIVE_CSV)
 
-    # Export Discarded CSV
-    with open(OUTPUT_DISCARDED_CSV, 'w', newline='', encoding='utf-8') as f:
+    # 3. WORKING_LEADS_MASTER.csv & WORKING_LEADS_MASTER.xlsx
+    working_headers = [
+        "Name",
+        "Email",
+        "Company",
+        "Role Target",
+        "Status",
+        "Sent At",
+        "Sender Email",
+        "Reply Snippet",
+        "Reply Date",
+    ]
+    tmp_w_csv = OUTPUT_DIR / ".WORKING_LEADS_MASTER.tmp.csv"
+    with open(tmp_w_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(headers_disc)
-        for r in discarded_rows:
-            w.writerow([r[0], r[1] or "Professional", r[2], r[3], r[4], "DISCARDED (BOUNCED)" if r[5] == 'bounced' else "EXCLUDED", r[6], "SMTP Bounce / Churned - DO NOT USE"])
-    print(f"[SheetSync] Discarded CSV exported to {OUTPUT_DISCARDED_CSV}")
+        w.writerow(working_headers)
+        for r in active_rows:
+            w.writerow([
+                r.get("name") or "",
+                r.get("email") or "",
+                r.get("company") or "",
+                r.get("role_target") or "",
+                r.get("status") or "",
+                r.get("last_sent_at") or r.get("first_sent_at") or "",
+                r.get("sender_email") or "",
+                r.get("reply_snippet") or "",
+                r.get("reply_received_at") or "",
+            ])
+    os.replace(tmp_w_csv, OUTPUT_WORKING_CSV)
 
+    wb_work = openpyxl.Workbook()
+    ws_work = wb_work.active
+    ws_work.title = "Working Leads Master"
+    ws_work.append(working_headers)
+    for r in active_rows:
+        ws_work.append([
+            r.get("name") or "",
+            r.get("email") or "",
+            r.get("company") or "",
+            r.get("role_target") or "",
+            r.get("status") or "",
+            r.get("last_sent_at") or r.get("first_sent_at") or "",
+            r.get("sender_email") or "",
+            r.get("reply_snippet") or "",
+            r.get("reply_received_at") or "",
+        ])
+    tmp_w_xlsx = OUTPUT_DIR / ".WORKING_LEADS_MASTER.tmp.xlsx"
+    wb_work.save(tmp_w_xlsx)
+    os.replace(tmp_w_xlsx, OUTPUT_WORKING_XLSX)
+
+    # 4. cleaned_recruiter_leads.json
+    json_leads = [
+        {
+            "name": r.get("name") or "Hiring Team",
+            "email": r.get("email") or "",
+            "company": r.get("company") or "",
+            "role_target": r.get("role_target") or "Associate Product Manager / Product & Business Analyst",
+            "status": r.get("status") or "pending",
+        }
+        for r in active_rows
+    ]
+    tmp_json = OUTPUT_DIR / ".cleaned_recruiter_leads.tmp.json"
+    with open(tmp_json, "w", encoding="utf-8") as jf:
+        json.dump(json_leads, jf, indent=2, ensure_ascii=False)
+    os.replace(tmp_json, OUTPUT_CLEAN_JSON)
+
+    print(f"[SheetSync] Saved clean MASTER_LEADS_SHEET.xlsx, WORKING_LEADS_MASTER.xlsx/.csv, ACTIVE_DELIVERED_LEADS.csv, and cleaned_recruiter_leads.json.")
     return {
         "active_count": len(active_rows),
-        "discarded_count": len(discarded_rows),
+        "blocked_count": blocklist_count,
         "xlsx_path": str(OUTPUT_XLSX),
         "active_csv_path": str(OUTPUT_ACTIVE_CSV),
-        "discarded_csv_path": str(OUTPUT_DISCARDED_CSV)
     }
+
 
 if __name__ == "__main__":
     export_split_leads()
