@@ -180,7 +180,7 @@ class DiscordListener:
             }]
         }]
 
-        models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash"]
+        models_to_try = ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
         active_model_idx = 0
 
         try:
@@ -222,12 +222,13 @@ class DiscordListener:
                     cmd_str = (fc.get("args") or {}).get("command", "")
                     print(f"[DiscordCLI:CloudTool] Executing: {cmd_str}")
                     tool_out = self.execute_bash_direct(cmd_str)
-                    fn_responses.append({
-                        "functionResponse": {
-                            "name": fc["name"],
-                            "response": {"output": tool_out}
-                        }
-                    })
+                    fn_resp_obj = {
+                        "name": fc["name"],
+                        "response": {"output": tool_out}
+                    }
+                    if "id" in fc:
+                        fn_resp_obj["id"] = fc["id"]
+                    fn_responses.append({"functionResponse": fn_resp_obj})
                 contents.append({"role": "user", "parts": fn_responses})
             return "⚠️ Completed 8 tool steps; run `status` or `!sh ps aux` to inspect state."
         finally:
