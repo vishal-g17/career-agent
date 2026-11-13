@@ -1,0 +1,14 @@
+{
+  "id": "dashboard",
+  "title": "LinkedIn Agent 24/7 Command Dashboard",
+  "visibility": "public",
+  "folder": "analytics",
+  "tags": [
+    "dashboard",
+    "live",
+    "jobs",
+    "posts"
+  ],
+  "created": "2026-11-09T16:45:41.728905Z",
+  "updated": "2026-11-09T16:45:41.728918Z"
+}

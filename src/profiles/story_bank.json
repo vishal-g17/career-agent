@@ -1,0 +1,89 @@
+{
+  "candidate": {
+    "name": "Candidate",
+    "education": {
+      "institution": "Netaji Subhas University of Technology (NSUT), Delhi",
+      "degree": "B.Tech in Computer Science & Engineering (Mathematics & Computing)",
+      "batch": "2022 - 2026"
+    },
+    "target_roles": [
+      "Associate Product Manager",
+      "Product Manager",
+      "Tech Product Analyst",
+      "Product Operations Manager",
+      "Category Manager"
+    ]
+  },
+  "stories": [
+    {
+      "id": "merchant_cancellations",
+      "context": "a quick-commerce / hyperlocal marketplace startup",
+      "role": "Tech Product Analyst",
+      "core_metric": "Reduced merchant cancellation rates from 10–12% to 4–6%",
+      "hook_angle": "Merchant reactivation & operational friction",
+      "technical_details": "Built automated reactivation pipeline targeting inactive and high-cancellation merchant cohorts with root-cause categorization.",
+      "product_lesson": "High merchant churn usually stems from listing or SLA friction rather than lack of demand.",
+      "anonymization_note": "DO NOT name the company. Use 'a hyperlocal marketplace' or 'a quick-commerce startup'."
+    },
+    {
+      "id": "pricing_pipeline",
+      "context": "a quick-commerce / hyperlocal marketplace startup",
+      "role": "Tech Product Analyst",
+      "core_metric": "Fixed catalog deficit (<8 items, <60% images) and eliminated low CVR (<1%) pricing friction",
+      "hook_angle": "Dynamic pricing, POS webhooks & fuzzy matching",
+      "technical_details": "Built ingestion pipeline linking competitor crawlers with POS webhooks; fuzzy dish matching algorithm enforcing 1:1 MRP parity against competitor benchmarks while protecting platform discount margins.",
+      "product_lesson": "Pricing friction at the base item level quietly destroys customer trust and conversion.",
+      "anonymization_note": "DO NOT name the company or competitor benchmarks."
+    },
+    {
+      "id": "funnel_telemetry",
+      "context": "a quick-commerce / hyperlocal marketplace startup",
+      "role": "Tech Product Analyst",
+      "core_metric": "Real-time funnel monitoring: DAU -> Views -> Carts -> Orders",
+      "hook_angle": "Funnel conversion diagnostics & UI listing glitches",
+      "technical_details": "Telemetry diagnosing conversion drops (<1% CVR) across premium surfaces, discovering rendering and metadata sync glitches.",
+      "product_lesson": "When a high-intent surface has abysmal conversion, inspect raw client telemetry before assuming bad UX design.",
+      "anonymization_note": "DO NOT name the company or internal surfaces."
+    },
+    {
+      "id": "opportunity_mapping",
+      "context": "a quick-commerce / hyperlocal marketplace startup",
+      "role": "Tech Product Analyst",
+      "core_metric": "Supply-demand gap mapping across 7 mega cities",
+      "hook_angle": "Hyperlocal density & geo-level search gaps",
+      "technical_details": "Mapped locality-level and item-level search demand against inactive merchant supply to drive targeted sales and onboarding.",
+      "product_lesson": "Acquiring 100 random merchants is worthless compared to onboarding 5 merchants that satisfy unmet local search queries.",
+      "anonymization_note": "DO NOT name the company."
+    },
+    {
+      "id": "erp_automation",
+      "context": "a D2C / online consumer brand",
+      "role": "Business Analyst",
+      "core_metric": "Saved 3–4 hours of daily manual reporting",
+      "hook_angle": "Boring automations with massive ROI",
+      "technical_details": "Built Python, Playwright, and pandas pipeline auto-downloading, merging, and consolidating SKU-level PO/GRN/ATP data across ERP systems.",
+      "product_lesson": "The most impactful product tools often eliminate repetitive manual spreadsheet agony.",
+      "anonymization_note": "DO NOT name the company."
+    },
+    {
+      "id": "cross_source_audit",
+      "context": "a D2C / online consumer brand",
+      "role": "Business Analyst",
+      "core_metric": "Reconciled 6+ disparate data sources (Item Master, PO files, FC data, SKU master)",
+      "hook_angle": "Procurement accuracy & quick-commerce supply chain",
+      "technical_details": "Engineered automated cross-source pipelines with audit trails flagging unmapped records to protect procurement forecasting.",
+      "product_lesson": "Unmapped catalog records in quick-commerce silently lead to out-of-stock ghost orders.",
+      "anonymization_note": "DO NOT name the company or FC names."
+    },
+    {
+      "id": "founding_pm_llm",
+      "context": "an early-stage AI startup",
+      "role": "Founding Product Manager",
+      "core_metric": "Designed flow architecture integrating LLM model capabilities",
+      "hook_angle": "Real-world LLM product development vs. toy demos",
+      "technical_details": "Collaborated with engineers to structure prompts, validate model outputs, and establish deterministic fallback safeguards.",
+      "product_lesson": "80% of building LLM features in early-stage startups is data validation, edge-case guardrails, and latency management.",
+      "anonymization_note": "DO NOT name the company."
+    }
+  ]
+}

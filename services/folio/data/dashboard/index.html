@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinkedIn Agent 24/7 Command Dashboard</title>
+<style>
+:root {
+    --bg: #0f1115; --card-bg: #181b22; --border: #282d37;
+    --text: #e6edf3; --muted: #8b949e; --accent: #2f81f7;
+    --green: #238636; --blue: #1f6feb;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 2rem 1.5rem; line-height: 1.5;
+}
+.container { max-width: 1100px; margin: 0 auto; }
+header {
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; margin-bottom: 2rem;
+}
+h1 { font-size: 1.6rem; letter-spacing: -0.02em; }
+.status-pill {
+    background: rgba(35, 134, 54, 0.15); color: #3fb950; border: 1px solid rgba(63, 185, 80, 0.3);
+    padding: 0.3rem 0.8rem; border-radius: 999px; font-size: 0.85rem; font-weight: 600;
+}
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+@media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+h2 { font-size: 1.2rem; margin-bottom: 1rem; color: #58a6ff; display: flex; align-items: center; gap: 0.5rem; }
+.card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 1.2rem; margin-bottom: 1rem;
+}
+.card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.8rem; }
+.badge {
+    font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 4px; font-weight: 600; text-transform: uppercase;
+}
+.badge-post { background: rgba(88, 166, 255, 0.15); color: #58a6ff; }
+.content {
+    white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; color: #c9d1d9;
+    background: #0d1117; padding: 1rem; border-radius: 6px; border: 1px solid #21262d;
+}
+.company { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 0.2rem; }
+.score-badge {
+    background: rgba(35, 134, 54, 0.15); border: 1px solid rgba(63, 185, 80, 0.3); border-radius: 6px;
+    padding: 0.4rem 0.6rem; text-align: center;
+}
+.score-val { font-size: 1.3rem; font-weight: 700; color: #3fb950; line-height: 1; display: block; }
+.score-lbl { font-size: 0.65rem; color: #8b949e; letter-spacing: 0.05em; }
+.reasons { margin: 0.8rem 0; padding-left: 1.2rem; font-size: 0.85rem; color: #c9d1d9; }
+.card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--border); }
+.posted-tag { font-size: 0.8rem; color: var(--muted); }
+.apply-btn {
+    background: #238636; color: white; text-decoration: none; padding: 0.4rem 0.8rem;
+    border-radius: 6px; font-size: 0.85rem; font-weight: 600;
+}
+.apply-btn:hover { background: #2ea043; }
+</style>
+</head>
+<body>
+<div class="container">
+    <header>
+        <div>
+            <h1>🚀 LinkedIn 24/7 Multi-Agent Operating System</h1>
+            <p style="color: var(--muted); font-size: 0.9rem; margin-top: 0.2rem;">Live updates streamed via Cloudflare Tunnel</p>
+        </div>
+        <div class="status-pill">&bull; 24/7 ONLINE</div>
+    </header>
+    <div class="grid">
+        <div>
+            <h2>📝 Recent Post Drafts & Approvals</h2>
+            
+        <div class="card">
+            <div class="card-header">
+                <span class="badge badge-post">1</span>
+                <span class="score">Human Score: <strong>37.4/100</strong></span>
+                <span class="date">2026-11-09 16:00:42</span>
+            </div>
+            <pre class="content">Dashboards don't build products. People do.
+
+Everyone says we need more data to make better product decisions. After digging through pipelines and tracing conversion funnels at a quick-commerce startup, I think that is entirely wrong. We don't suffer from a lack of data. We suffer from a lack of operational context.
+
+It is easy to stare at a drop from impressions to carts and write a generic brief about improving user experience. But when you actually pull the raw telemetry, you usually find unsexy culprits. A metadata sync glitch, a missing catalog attribute, or a base item pricing error quietly killing your conversion rate. 
+
+Analytics tells you where the ship is leaking. It takes actual product intuition to figure out which hole to plug first without breaking the engine room. 
+
+What is the most useless metric your team currently tracks just to fill up a weekly slide deck?
+</pre>
+        </div>
+        
+        <div class="card">
+            <div class="card-header">
+                <span class="badge badge-post">1</span>
+                <span class="score">Human Score: <strong>43.4/100</strong></span>
+                <span class="date">2026-11-09 15:52:25</span>
+            </div>
+            <pre class="content">Everyone says you should focus on building shiny AI features first. After automating ERP workflows, I think that is wrong.
+
+Teams constantly jump straight to prompt engineering while their operational backends drown in spreadsheets. But you rarely need an LLM to generate immediate product value. Sometimes you just need code that stops people from copy-pasting data across five browser tabs.
+
+At a D2C consumer brand, the ops team spent half their morning manually reconciling stock numbers. I built a Python, Playwright, and pandas pipeline to auto-download, merge, and consolidate SKU-level PO, GRN, and ATP data across ERP systems.
+
+We saved 3-4 hours of daily manual reporting.
+
+There was no prompt drift, zero model latency, and no edge-case hallucination guardrails to manage. Just simple data engineering replacing repetitive agony. The highest-ROI features are often the boring internal tools no one showcases on demo day.
+
+What unsexy script saved your team more time than a headline feature?
+</pre>
+        </div>
+        
+        <div class="card">
+            <div class="card-header">
+                <span class="badge badge-post">1</span>
+                <span class="score">Human Score: <strong>52.0/100</strong></span>
+                <span class="date">2026-11-09 15:27:34</span>
+            </div>
+            <pre class="content">Everyone says high merchant cancellations are a customer demand problem. After fixing cancellations at Magicpin, I know that's wrong.
+
+When merchant cancellations sat at 10-12%, the easiest reaction was to blame buyer intent. But throwing more traffic at a broken operational pipeline never fixes seller behavior.
+
+As a Tech Product Analyst, I built an automated reactivation pipeline targeting inactive and high-cancellation merchant cohorts with root-cause categorization. 
+
+The data was clear. High merchant churn usually stems from listing or SLA friction, not a lack of customer interest. Merchants canceled orders because of catalog errors, bad metadata syncs, or unrealistic preparation buffers. 
+
+Addressing those structural bottlenecks directly pulled cancellation rates down from 10-12% to 4-6%. 
+
+If your operational machinery forces merchants to drop orders, top-of-funnel growth just speeds up churn.
+
+Are you diagnosing seller cancellation loops with raw pipeline telemetry, or just pushing more traffic to broken surfaces?
+</pre>
+        </div>
+        
+        </div>
+        <div>
+            <h2>🔥 Fresh Job Matches (<24h)</h2>
+            
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Associate Technical Program Manager (EG) - Bengaluru, India</h3>
+                    <span class="company">Fictiv &bull; Greater Bengaluru Area</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">100</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Associate Category / Program / Operations role</li><li>Explicit early career / graduate cohort</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">3 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/associate-technical-program-manager-eg-bengaluru-india-at-fictiv-4188963140" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Forward Deployed Engineer - India</h3>
+                    <span class="company">Cursor &bull; Mumbai, Maharashtra, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">95</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: FDE/FDSE role (matches NSUT CSE/M&C engineering depth)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">4 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/forward-deployed-engineer-india-at-cursor-4472493055" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Forward Deployed Engineer (FDE)</h3>
+                    <span class="company">UNKAPPED &bull; India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">95</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: FDE/FDSE role (matches NSUT CSE/M&C engineering depth)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">4 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/forward-deployed-engineer-fde-at-unkapped-4486202610" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Agentic Forward Deployed Engineer/ FDE</h3>
+                    <span class="company">HCLTech &bull; Bengaluru, Karnataka, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">95</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: FDE/FDSE role (matches NSUT CSE/M&C engineering depth)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">3 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/agentic-forward-deployed-engineer-fde-at-hcltech-4487157512" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Forward Deployed Engineer I</h3>
+                    <span class="company">Handshake &bull; Bengaluru, Karnataka, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">95</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: FDE/FDSE role (matches NSUT CSE/M&C engineering depth)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">4 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/forward-deployed-engineer-i-at-handshake-4444730234" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Founder's Office</h3>
+                    <span class="company">Weekday (YC W21) &bull; Bengaluru, Karnataka, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">90</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Founder's Office / Generalist role</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">4 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/founder-s-office-at-weekday-yc-w21-4461851420" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Founder's Office - Growth &amp; BD</h3>
+                    <span class="company">Projectstudio.ai &bull; Mumbai, Maharashtra, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">90</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Founder's Office / Generalist role</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">2 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/founder-s-office-growth-bd-at-projectstudio-ai-4487923384" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst II, Relay Product Excellence</h3>
+                    <span class="company">Amazon &bull; Bengaluru, Karnataka, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">3 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-ii-relay-product-excellence-at-amazon-4464065297" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst</h3>
+                    <span class="company">Flexiple &bull; Bengaluru, Karnataka, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">23 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-at-flexiple-4488781892" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst</h3>
+                    <span class="company">SureSkills &bull; Pune District, Maharashtra, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">1 hour ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-at-sureskills-4488882383" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst</h3>
+                    <span class="company">BNP Paribas &bull; Mumbai, Maharashtra, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">6 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-at-bnp-paribas-4488850116" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business analyst</h3>
+                    <span class="company">BNP Paribas &bull; Tamil Nadu, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">6 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-at-bnp-paribas-4488833806" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst</h3>
+                    <span class="company">BeeHyv Software &bull; New Delhi, Delhi, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">8 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-at-beehyv-software-4487690208" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst - Wholesale &amp; Risk</h3>
+                    <span class="company">IDFC FIRST Bank &bull; Mumbai, Maharashtra, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">4 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-wholesale-risk-at-idfc-first-bank-4479982010" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        <div class="card job-card">
+            <div class="card-header">
+                <div class="job-title-row">
+                    <h3>Business Analyst</h3>
+                    <span class="company">Orange Technologies &bull; Gurugram, Haryana, India</span>
+                </div>
+                <div class="score-badge">
+                    <span class="score-val">85</span>
+                    <span class="score-lbl">MATCH</span>
+                </div>
+            </div>
+            <ul class="reasons"><li>High match: Business Analyst (matches data & automation experience)</li></ul>
+            <div class="card-footer">
+                <span class="posted-tag">8 hours ago</span>
+                <a href="https://in.linkedin.com/jobs/view/business-analyst-at-orange-technologies-4487683322" target="_blank" class="apply-btn">Apply on LinkedIn &rarr;</a>
+            </div>
+        </div>
+        
+        </div>
+    </div>
+</div>
+</body>
+</html>
+    

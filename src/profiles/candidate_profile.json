@@ -1,0 +1,50 @@
+{
+  "personal": {
+    "full_name": "Vishal Gupta",
+    "first_name": "Vishal",
+    "last_name": "Gupta",
+    "email": "vishal90301@gmail.com",
+    "phone": "+918368387245",
+    "city": "Delhi NCR / Gurugram, India",
+    "country": "India",
+    "willing_to_relocate": "Yes (Anywhere / Bangalore, Gurgaon, Mumbai, Remote)",
+    "notice_period": "15 days",
+    "current_ctc_lpa": "12 LPA (10 LPA Fixed)",
+    "expected_ctc_lpa": "15 - 18 LPA",
+    "current_company": "a quick-commerce startup",
+    "current_title": "Tech Product Analyst",
+    "linkedin_url": "https://www.linkedin.com/in/vshal-g007/",
+    "github_url": "https://github.com/vishal-g17",
+    "portfolio_url": "",
+    "resume_drive_link": "https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing",
+    "resume_local_pdf_path": "/Users/admin/Downloads/Vishal_Gupta_Resume.pdf"
+  },
+  "education": {
+    "institution": "Netaji Subhas University of Technology (NSUT), Delhi",
+    "degree": "Bachelor of Technology (B.Tech)",
+    "major": "Computer Science & Engineering (Mathematics & Computing)",
+    "batch": "2022 - 2026",
+    "graduation_year": "2026",
+    "cgpa": "7.05"
+  },
+  "skills_summary": {
+    "product_management": ["PRD Writing", "Funnel Telemetry", "A/B Testing", "Conversion Rate Optimization (CVR)", "User Story Mapping", "Roadmap Planning", "Merchant Reactivation"],
+    "technical_skills": ["Python", "SQL / BigQuery", "Playwright Automation", "pandas", "REST APIs", "Postman", "LLM Pipelines / Prompt Engineering"],
+    "business_analytics": ["ERP Integration", "SKU Reconciliation", "Pricing Automation", "POS Webhooks", "Dynamic Pricing Parity"]
+  },
+  "screening_defaults": {
+    "years_of_experience_total": "1 year",
+    "years_of_experience_pm": "1 year",
+    "years_of_experience_sql": "1-2 years",
+    "years_of_experience_python": "1-2 years",
+    "authorized_to_work_in_india": "Yes",
+    "require_visa_sponsorship": "No",
+    "notice_period_days": "15",
+    "current_ctc": "1200000",
+    "expected_ctc": "1600000"
+  },
+  "cold_email_template": {
+    "subject": "Application / Quick Introduction: Vishal Gupta — {role} ({company})",
+    "body": "Hi,\n\nI’m Vishal Gupta, a B.Tech graduate in Mathematics & Computing (CSE) from NSUT Delhi, currently serving notice period and available to join immediately (15 days).\n\nAcross my experiences as an analytical operator, I’ve worked on product growth, merchant reactivation, conversion optimization, dynamic pricing parity, and automation pipelines. Some of my key contributions include reducing merchant cancellations from 10–12% to 4–6% at a quick-commerce startup and building Python and Playwright automation pipelines at a consumer D2C brand that eliminated 3–4 hours of daily manual reporting.\n\nI’m actively exploring opportunities across Product Management, APM, Product Analyst, Business Analyst, and Founder's Office roles. I’d appreciate it if you could consider my profile for relevant openings or connect me with the right person.\n\nResume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n\nBest regards,\nVishal Gupta\n📞 +91 8368387245\n✉️ vishal90301@gmail.com\n🔗 https://www.linkedin.com/in/vshal-g007"
+  }
+}

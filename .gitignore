@@ -1,0 +1,50 @@
+# Environment and sensitive keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.token
+
+# Databases & local state
+*.db
+*.sqlite
+*.sqlite3
+.linkedin_agent.db
+agent.db
+
+# Python cache & build
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+env/
+
+# Screenshots, generated images & bulk data
+data/*.png
+data/*.jpg
+data/*.jpeg
+data/*.csv
+data/*.xlsx
+data/*.zip
+data/*.json
+data/WORKING_LEADS_MASTER.*
+data/MASTER_LEADS_SHEET.*
+data/ACTIVE_DELIVERED_LEADS.*
+!data/resume.pdf
+!data/.gitkeep
+
+# Logs and runtime artifacts
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+# Headless browser / ridealong state
+ridealong/
+.cache/
