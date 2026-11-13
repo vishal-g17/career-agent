@@ -824,8 +824,8 @@ def run_master_cycle(interval_minutes: int = 1):
                 print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/10) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
                 # STAGE 0: Queue Check & Auto-Refill if low (only between batches or when critically low)
-                if queue_pending < 15:
-                    refill_connections_queue(page, conn, min_needed=40, max_scrolls=60)
+                if queue_pending < 5:
+                    refill_connections_queue(page, conn, min_needed=30, max_scrolls=140)
 
                 # STAGE A: 1st-Degree Messaging (10 messages at 1-minute gap, strictly 1 task at a time)
                 if daily_1st_sent < DAILY_MAX_1ST_DEGREE:

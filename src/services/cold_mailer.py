@@ -187,8 +187,10 @@ def send_cold_email_smtp(recipient_email: str, subject: str, body: str, sender_e
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
 
-        # Attach native ATS resume PDF
+        # Attach native ATS resume PDF (works on both Mac and Cloud Linux VM)
         pdf_path = "/Users/admin/Downloads/Vishal_Gupta_Resume.pdf"
+        if not os.path.exists(pdf_path):
+            pdf_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "resume.pdf")
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
                 part = MIMEApplication(f.read(), Name="Vishal_Gupta_Resume.pdf")
