@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Set, Dict, Any, List
 
 import shutil
+import urllib.request
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -56,29 +57,36 @@ class DiscordListener:
 
         ps_res = subprocess.run(['ps', 'aux'], capture_output=True, text=True).stdout
         procs = {
-            'LinkedIn Cycle': 'master_autonomous_cycle.py',
-            'Portal ATS Worker': 'run_portal_worker.py',
+            'Portal ATS Hunter': 'run_portal_worker.py',
             'Cold Email Worker': 'run_email_worker.py',
-            'Discord Remote CLI': 'discord_listener.py',
-            'Ridealong Browser': 'ridealong'
+            'Discord Listener': 'discord_listener.py',
+            'Headless Chromium': 'chrome-headless-shell'
         }
-        lines.append("**Processes:**")
+        lines.append("**Processes (Cloud VM):**")
         for label, pat in procs.items():
             running = any(pat in l for l in ps_res.splitlines())
             status_icon = "🟢 RUNNING" if running else "🔴 STOPPED"
             lines.append(f"• {label}: {status_icon}")
 
         try:
-            conn = sqlite3.connect('/Users/admin/.linkedin_agent.db')
+            db_path = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
+            if not os.path.exists(db_path):
+                db_path = str(PROJECT_ROOT / ".linkedin_agent.db")
+            if not os.path.exists(db_path):
+                db_path = str(PROJECT_ROOT / "agent.db")
+            conn = sqlite3.connect(db_path)
             c = conn.cursor()
             c.execute('SELECT status, count(*) FROM outreach_leads GROUP BY status')
             email_counts = dict(c.fetchall())
             lines.append("\n**Outreach Leads:**")
             lines.append(f"• Sent: {email_counts.get('sent', 0)} | Bounced: {email_counts.get('bounced', 0)} | Replies: {email_counts.get('replied', 0)}")
 
-            c.execute('SELECT count(*) FROM linkedin_connections_outreach')
-            li_sent = c.fetchone()[0]
-            lines.append(f"\n**LinkedIn Outreach:**\n• Total 1st-Degree Sent: {li_sent}")
+            try:
+                c.execute('SELECT count(*) FROM linkedin_connections_outreach')
+                li_sent = c.fetchone()[0]
+                lines.append(f"\n**LinkedIn Outreach:**\n• Total 1st-Degree Sent: {li_sent}")
+            except Exception:
+                pass
 
             c.execute('SELECT status, count(*) FROM jobs GROUP BY status')
             job_counts = dict(c.fetchall())
@@ -89,12 +97,60 @@ class DiscordListener:
 
         return "\n".join(lines)
 
+    def ask_gemini_agent(self, prompt: str) -> str:
+        """Fallback conversational intelligence via Gemini Flash API when agy binary is not present on VM."""
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key and os.path.exists(str(PROJECT_ROOT / ".env")):
+            for line in open(str(PROJECT_ROOT / ".env")):
+                if line.startswith("GEMINI_API_KEY="):
+                    api_key = line.strip().split("=", 1)[1]
+        if not api_key:
+            return "❌ Agent Error: No `GEMINI_API_KEY` configured in `.env`."
+
+        system_context = (
+            "You are Vishal Gupta's Autonomous Multi-Agent Career Acceleration System, "
+            "running 24/7 on an Oracle Cloud Infrastructure VM (Always Free Tier, 130.210.108.55) in Mumbai. "
+            "You manage 3 core parallel daemons: "
+            "1) Job Portal Worker (autonomous headless Chromium applying on Naukri, Indeed, Greenhouse, Lever), "
+            "2) Cold Email Outreach Worker (paced dual-sender SMTP alternating NSUT webmail & Gmail), "
+            "3) Discord Command Center (#prompt). "
+            "Candidate Profile: Vishal Gupta, B.Tech NSUT Delhi, 1 yr experience in APM / Product & Analytics, "
+            "immediate joiner (15-day notice period). "
+            "Confidentiality rule: NEVER mention past employer names under any circumstances. "
+            "Answer the user's questions clearly, concisely, and supportively."
+        )
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": f"System Context:\n{system_context}\n\nUser Question:\n{prompt}"}
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "maxOutputTokens": 800,
+                "temperature": 0.3
+            }
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            res_json = json.loads(resp.read().decode())
+            return res_json["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception as e:
+            return f"❌ AI Response Error: `{e}`"
+
     def run_antigravity_cli_turn(self, prompt: str, target_channel: str, msg_id: str) -> str:
         """
-        Executes the prompt through the Antigravity (AGY) CLI engine.
-        Acts exact same to the CLI with full agentic capabilities:
-        running bash, editing files, inspecting DB, checking processes, and continuing conversation.
+        Executes the prompt through the Antigravity (AGY) CLI engine if available,
+        or falls back directly to the Gemini agent.
         """
+        if not shutil.which(AGY_BIN) and not os.path.exists(AGY_BIN):
+            print(f"[DiscordCLI:AGY] AGY binary not found at '{AGY_BIN}'. Routing to Gemini agent fallback...")
+            return self.ask_gemini_agent(prompt)
+
         print(f"[DiscordCLI:AGY] Dispatching turn to Antigravity CLI: {prompt}")
 
         # Continuous typing indicator while Antigravity thinks and acts
