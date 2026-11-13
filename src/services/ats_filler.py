@@ -29,17 +29,40 @@ def fill_ats_application(url: str, role_title: str = "Associate Product Manager"
 
     profile = load_candidate_profile()
     p = profile.get("personal", {})
-    pdf_path = "/Users/admin/Downloads/Vishal_Gupta_Resume.pdf"
-    if not os.path.exists(pdf_path):
-        pdf_path = p.get("resume_local_pdf_path", "/Users/admin/linkedin-multiagent/data/resume.pdf")
+    from pathlib import Path
+    project_root = Path(__file__).resolve().parent.parent.parent
+    possible_paths = [
+        os.environ.get("RESUME_PATH"),
+        str(Path.home() / "career-agent" / "Vishal_Gupta_Resume.pdf"),
+        str(Path.home() / "career-agent" / "data" / "resume.pdf"),
+        str(project_root / "Vishal_Gupta_Resume.pdf"),
+        str(project_root / "data" / "resume.pdf"),
+        "/Users/admin/Downloads/Vishal_Gupta_Resume.pdf",
+        p.get("resume_local_pdf_path")
+    ]
+    pdf_path = next((path for path in possible_paths if path and os.path.exists(path)), str(project_root / "data" / "resume.pdf"))
 
     print(f"\n[ATSFiller] Processing application for: {role_title} ({url})")
 
     with sync_playwright() as p_play:
         target_page = None
+        browser = None
+        is_local_browser = False
         try:
-            browser = p_play.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
-            context = browser.contexts[0]
+            try:
+                browser = p_play.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+            except Exception:
+                browser = p_play.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+                )
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800}
+                )
+                is_local_browser = True
+
             page = context.new_page()
             target_page = page
 
@@ -430,6 +453,11 @@ def fill_ats_application(url: str, role_title: str = "Associate Product Manager"
             if target_page:
                 try:
                     target_page.close()
+                except:
+                    pass
+            if browser and is_local_browser:
+                try:
+                    browser.close()
                 except:
                     pass
 

@@ -2,12 +2,20 @@ import sys
 import os
 import time
 import sqlite3
+from pathlib import Path
 
-sys.path.insert(0, '/Users/admin/linkedin-multiagent')
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 from src.services.naukri_filler import apply_to_naukri_job
 from src.engine.discord_client import DiscordClient
 
-DB_PATH = os.path.expanduser('~/.linkedin_agent.db')
+DB_PATH = os.environ.get("DATABASE_PATH") or os.path.expanduser('~/.linkedin_agent.db')
+if not os.path.exists(DB_PATH):
+    DB_PATH = str(PROJECT_ROOT / ".linkedin_agent.db")
+if not os.path.exists(DB_PATH):
+    DB_PATH = str(PROJECT_ROOT / "agent.db")
+
 DISCORD_CHANNEL = "1569246471251959838"
 
 def run_naukri_batch(limit: int = 50):

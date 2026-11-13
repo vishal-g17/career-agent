@@ -22,7 +22,11 @@ from src.agents.job_hunter import run_job_hunt
 from scripts.run_naukri_batch import run_naukri_batch
 from scripts.process_external_redirects import process_redirects
 
-DB_PATH = os.path.expanduser('~/.linkedin_agent.db')
+DB_PATH = os.environ.get("DATABASE_PATH") or os.path.expanduser('~/.linkedin_agent.db')
+if not os.path.exists(DB_PATH):
+    DB_PATH = str(PROJECT_ROOT / ".linkedin_agent.db")
+if not os.path.exists(DB_PATH):
+    DB_PATH = str(PROJECT_ROOT / "agent.db")
 
 def get_pending_portal_counts():
     conn = sqlite3.connect(DB_PATH)

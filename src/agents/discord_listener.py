@@ -59,14 +59,24 @@ class DiscordListener:
         procs = {
             'Portal ATS Hunter': 'run_portal_worker.py',
             'Cold Email Worker': 'run_email_worker.py',
-            'Discord Listener': 'discord_listener.py',
-            'Headless Chromium': 'chrome-headless-shell'
+            'Discord Listener': 'discord_listener.py'
         }
         lines.append("**Processes (Cloud VM):**")
         for label, pat in procs.items():
             running = any(pat in l for l in ps_res.splitlines())
             status_icon = "🟢 RUNNING" if running else "🔴 STOPPED"
             lines.append(f"• {label}: {status_icon}")
+
+        # Check Headless Playwright / Chromium status
+        has_active_chrome = any(k in ps_res for k in ['chrome-headless-shell', 'playwright', 'chromium'])
+        portal_running = any('run_portal_worker.py' in l for l in ps_res.splitlines())
+        if has_active_chrome:
+            chrome_status = "🟢 ACTIVE (Scraping/Applying)"
+        elif portal_running:
+            chrome_status = "🟢 READY (Cycles On-Demand)"
+        else:
+            chrome_status = "🔴 STOPPED"
+        lines.append(f"• Headless Chromium: {chrome_status}")
 
         try:
             db_path = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
@@ -117,6 +127,8 @@ class DiscordListener:
             "Candidate Profile: Vishal Gupta, B.Tech NSUT Delhi, 1 yr experience in APM / Product & Analytics, "
             "immediate joiner (15-day notice period). "
             "Confidentiality rule: NEVER mention past employer names under any circumstances. "
+            "Important note on Ridealong / Headless Chromium: Ridealong was only the temporary local browser on the corporate laptop; "
+            "the system now uses native headless Playwright Chromium running 24/7 autonomously on the cloud VM with zero laptop dependency. "
             "Answer the user's questions clearly, concisely, and supportively."
         )
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={api_key}"

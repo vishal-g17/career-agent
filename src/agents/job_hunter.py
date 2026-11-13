@@ -195,7 +195,7 @@ def scrape_fresh_linkedin_jobs(keyword: str, location: str = "India", max_pages:
 
 def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None, location: str = "India") -> List[Dict[str, Any]]:
     """
-    Scrapes fresh Indeed India jobs (<24h, fromage=1) using persistent Ridealong session.
+    Scrapes fresh Indeed India jobs (<24h, fromage=1) using Ridealong CDP or native headless Playwright.
     """
     if keywords is None:
         keywords = ["Associate Product Manager", "Product Analyst", "Business Analyst"]
@@ -205,8 +205,22 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None, location: str
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            browser = None
+            is_local = False
+            try:
+                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+            except Exception:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+                )
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1366, "height": 768}
+                )
+                is_local = True
+
             page = context.new_page()
             
             for kw in keywords:
@@ -214,7 +228,7 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None, location: str
                     q = urllib.parse.quote(kw)
                     # fromage=1 strictly filters for jobs posted in the past 24 hours
                     search_url = f"https://in.indeed.com/jobs?q={q}&l={urllib.parse.quote(location)}&fromage=1"
-                    page.goto(search_url, timeout=25000)
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
                     page.wait_for_timeout(2000)
                     
                     cards = page.locator("div.job_seen_beacon").all()
@@ -253,14 +267,19 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None, location: str
                     print(f"[JobHunter] Indeed scrape error for '{kw}': {pe}")
                     continue
             page.close()
+            if is_local and browser:
+                try:
+                    browser.close()
+                except:
+                    pass
     except Exception as e:
-        print(f"[JobHunter] Indeed CDP connection error: {e}")
+        print(f"[JobHunter] Indeed scraper notice: {e}")
         
     return found_jobs
 
 def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """
-    Scrapes fresh Naukri jobs (<24h, dayFilter=1) using persistent Ridealong session.
+    Scrapes fresh Naukri jobs (<24h, dayFilter=1) using Ridealong CDP or native headless Playwright.
     """
     if keywords is None:
         keywords = ["associate product manager", "product analyst", "business analyst"]
@@ -270,8 +289,22 @@ def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            browser = None
+            is_local = False
+            try:
+                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+            except Exception:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+                )
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1366, "height": 768}
+                )
+                is_local = True
+
             page = context.new_page()
             
             for kw in keywords:
@@ -279,7 +312,7 @@ def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
                     slug = kw.strip().lower().replace(" ", "-")
                     # dayFilter=1 filters jobs posted in the last 24 hours
                     search_url = f"https://www.naukri.com/{slug}-jobs?dayFilter=1"
-                    page.goto(search_url, timeout=25000)
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
                     page.wait_for_timeout(2000)
                     
                     cards = page.locator(".srp-jobtuple-wrapper, div.cust-job-tuple").all()
@@ -318,8 +351,13 @@ def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
                     print(f"[JobHunter] Naukri scrape error for '{kw}': {pe}")
                     continue
             page.close()
+            if is_local and browser:
+                try:
+                    browser.close()
+                except:
+                    pass
     except Exception as e:
-        print(f"[JobHunter] Naukri CDP connection error: {e}")
+        print(f"[JobHunter] Naukri scraper notice: {e}")
         
     return found_jobs
 
@@ -407,7 +445,9 @@ def run_job_hunt() -> Dict[str, Any]:
 
     return {
         "total_scanned": len(all_fresh),
+        "total_scraped": len(all_fresh),
         "new_discovered": len(new_jobs),
+        "saved_to_db": len(new_jobs),
         "hot_matches": hot_matches,
         "solid_matches": solid_matches
     }

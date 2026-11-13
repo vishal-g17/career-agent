@@ -6,8 +6,18 @@ from playwright.sync_api import sync_playwright
 from .form_answerer import answer_standard_field, answer_open_ended_question, load_candidate_profile
 from ..db import database
 
+from pathlib import Path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+possible_resume_paths = [
+    os.environ.get("RESUME_PATH"),
+    str(Path.home() / "career-agent" / "Vishal_Gupta_Resume.pdf"),
+    str(Path.home() / "career-agent" / "data" / "resume.pdf"),
+    str(PROJECT_ROOT / "Vishal_Gupta_Resume.pdf"),
+    str(PROJECT_ROOT / "data" / "resume.pdf"),
+    "/Users/admin/Downloads/Vishal_Gupta_Resume.pdf",
+]
+RESUME_PATH = next((cand for cand in possible_resume_paths if cand and os.path.exists(cand)), str(PROJECT_ROOT / "data" / "resume.pdf"))
 RIDEALONG_CDP_ENDPOINT = "http://127.0.0.1:9230/default/naukri-apply-bot"
-RESUME_PATH = "/Users/admin/linkedin-multiagent/data/resume.pdf"
 
 def determine_radio_choice(question_text: str, options: List[str]) -> str:
     """Intelligently picks the best radio option for candidate Vishal Gupta."""
@@ -125,9 +135,23 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
     print(f"\n[NaukriApply] Starting application for: {role_title} ({job_url})")
 
     with sync_playwright() as p:
+        browser = None
+        is_local = False
         try:
-            browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
-            context = browser.contexts[0]
+            try:
+                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
+                context = browser.contexts[0] if browser.contexts else browser.new_context()
+            except Exception:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
+                )
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1366, "height": 768}
+                )
+                is_local = True
+
             page = context.new_page()
 
             page.goto(job_url, wait_until="domcontentloaded", timeout=30000)
@@ -359,3 +383,9 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
             print(f"[NaukriApply] Exception while applying: {e}")
             result["error"] = str(e)
             return result
+        finally:
+            if browser and is_local:
+                try:
+                    browser.close()
+                except:
+                    pass

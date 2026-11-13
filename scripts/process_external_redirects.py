@@ -11,7 +11,11 @@ from src.services.ats_filler import fill_ats_application
 from src.engine.discord_client import DiscordClient
 from src import config
 
-DB_PATH = os.path.expanduser('~/.linkedin_agent.db')
+DB_PATH = os.environ.get("DATABASE_PATH") or os.path.expanduser('~/.linkedin_agent.db')
+if not os.path.exists(DB_PATH):
+    DB_PATH = str(PROJECT_ROOT / ".linkedin_agent.db")
+if not os.path.exists(DB_PATH):
+    DB_PATH = str(PROJECT_ROOT / "agent.db")
 
 def process_redirects(max_jobs: int = 15):
     conn = sqlite3.connect(DB_PATH)
