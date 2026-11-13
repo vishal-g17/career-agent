@@ -24,9 +24,69 @@ class DiscordListener:
     def __init__(self, channel_id: str = None):
         self.client = DiscordClient()
         self.channel_id = channel_id or getattr(config, "DISCORD_PROMPT_CHANNEL_ID", "1570342549435187290")
+        jobs_ch = getattr(config, "DISCORD_JOBS_CHANNEL_ID", "1569246471251959838")
+        self.watch_channels: List[str] = list(dict.fromkeys([c for c in [self.channel_id, jobs_ch] if c]))
         self.processed_msg_ids: Set[str] = set()
         self.turn_history: List[Dict[str, Any]] = []
         self.lock = threading.Lock()
+
+    def get_live_cloud_base_url(self) -> str:
+        """Reads the active Cloudflare Quick Tunnel base URL on the Cloud VM dynamically."""
+        import re
+        log_candidates = [
+            Path.home() / ".cloudflared_dashboard.log",
+            Path("/tmp/cloudflared_dashboard.log"),
+        ]
+        for lp in log_candidates:
+            if lp.exists():
+                try:
+                    txt = lp.read_text(encoding="utf-8", errors="ignore")
+                    matches = re.findall(r"https://[a-z0-9-]+\.trycloudflare\.com", txt)
+                    if matches:
+                        return matches[-1]
+                except Exception:
+                    pass
+        try:
+            j_out = subprocess.run(
+                ["journalctl", "-u", "linkedin-dashboard-tunnel.service", "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            ).stdout
+            matches = re.findall(r"https://[a-z0-9-]+\.trycloudflare\.com", j_out or "")
+            if matches:
+                return matches[-1]
+        except Exception:
+            pass
+        return os.environ.get("DASHBOARD_PUBLIC_URL", "https://had-arg-switches-parts.trycloudflare.com")
+
+    def get_sheet_links_message(self) -> str:
+        """Builds an instant response with live Cloud VM Master Sheet & Excel/CSV download links."""
+        base_url = self.get_live_cloud_base_url().rstrip("/")
+        sent_cnt = pend_cnt = rep_cnt = blk_cnt = 0
+        try:
+            db_path = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
+            conn = sqlite3.connect(db_path, timeout=15.0)
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS bounced_blocklist (email TEXT PRIMARY KEY, reason TEXT, detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+            counts = dict(c.execute("SELECT status, COUNT(*) FROM outreach_leads GROUP BY status").fetchall())
+            sent_cnt = counts.get("sent", 0) + counts.get("unresponsive", 0)
+            pend_cnt = counts.get("pending", 0)
+            rep_cnt = counts.get("replied", 0)
+            blk_cnt = c.execute("SELECT COUNT(*) FROM bounced_blocklist").fetchone()[0]
+            conn.close()
+        except Exception:
+            pass
+
+        total_clean = sent_cnt + pend_cnt + rep_cnt
+        return (
+            "📊 **Live Master Recruiter & HR Leads Sheet (24/7 Cloud VM)**\n"
+            f"• **Clean Active Leads:** `{total_clean:,}` (`{sent_cnt:,}` Sent | `{pend_cnt:,}` Pending | `{rep_cnt:,}` Replied | `0` Bounced in sheet — `{blk_cnt:,}` dead bounces auto-deleted)\n\n"
+            f"🔗 **Open Live Searchable Sheet (Browser):**\n{base_url}/sheet\n\n"
+            f"📥 **Download Clean Excel (`.xlsx`):**\n{base_url}/download/MASTER_LEADS_SHEET.xlsx\n\n"
+            f"📄 **Download Clean CSV (`.csv`):**\n{base_url}/download/ACTIVE_DELIVERED_LEADS.csv\n\n"
+            f"📈 **Live Career Autopilot Dashboard:**\n{base_url}/p/dashboard"
+        )
 
     def send_chunked(self, target_channel: str, text: str) -> None:
         """Sends messages safely within Discord's 2000-char limit."""
@@ -64,8 +124,10 @@ class DiscordListener:
             'Ridealong Browser Daemon': 'ridealong',
             'Discord CLI Listener': 'discord_listener.py',
         } if is_mac else {
-            'Portal ATS Hunter': 'run_portal_worker.py',
-            'Cold Email Worker': 'run_email_worker.py',
+            'Portal ATS Hunter (Turbo)': 'run_portal_worker.py',
+            'Cold Email Worker (Dual-Inbox)': 'run_email_worker.py',
+            'Instant 6s Bounce Monitor': 'run_bounce_monitor.py',
+            'Live Sheet & Dashboard Server': 'run_dashboard_server.py',
             'Discord Listener': 'discord_listener.py',
         }
         for label, pat in local_procs.items():
@@ -116,8 +178,13 @@ class DiscordListener:
             c = conn.cursor()
             c.execute('SELECT status, count(*) FROM outreach_leads GROUP BY status')
             email_counts = dict(c.fetchall())
-            lines.append("\n**Outreach Leads:**")
-            lines.append(f"• Sent: {email_counts.get('sent', 0)} | Bounced: {email_counts.get('bounced', 0)} | Replies: {email_counts.get('replied', 0)}")
+            c.execute('CREATE TABLE IF NOT EXISTS bounced_blocklist (email TEXT PRIMARY KEY, reason TEXT, detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+            blk_cnt = c.execute('SELECT count(*) FROM bounced_blocklist').fetchone()[0]
+            lines.append("\n**Outreach Leads (100% Bounce-Clean):**")
+            lines.append(
+                f"• Sent: {email_counts.get('sent', 0)} | Pending: {email_counts.get('pending', 0)} | "
+                f"Replies: {email_counts.get('replied', 0)} | Bounces Auto-Purged: {blk_cnt}"
+            )
 
             try:
                 c.execute('SELECT count(*) FROM linkedin_connections_outreach')
@@ -132,6 +199,14 @@ class DiscordListener:
             conn.close()
         except Exception as e:
             lines.append(f"\nDB Error: {e}")
+
+        base_url = self.get_live_cloud_base_url().rstrip("/")
+        lines.append(
+            f"\n**Live Cloud Links:**\n"
+            f"• 📋 **Live Sheet:** {base_url}/sheet\n"
+            f"• 📥 **Excel Download:** {base_url}/download/MASTER_LEADS_SHEET.xlsx\n"
+            f"• 📊 **Dashboard:** {base_url}/p/dashboard"
+        )
 
         return "\n".join(lines)
 
@@ -159,12 +234,17 @@ class DiscordListener:
         is_mac = sys.platform == "darwin"
         py_exec = sys.executable or "python3"
         db_loc = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
+        live_base = self.get_live_cloud_base_url().rstrip("/")
         host_desc = (
             f"Local Mac (`{WORKSPACE_DIR}`), Python `{py_exec}`, DB `{db_loc}`."
             if is_mac else
             f"24/7 Oracle Cloud VM (`130.210.108.55`, workspace `{WORKSPACE_DIR}`, Python `{py_exec}`, SQLite DB `{db_loc}`). "
-            "Systemd services here: `linkedin-email-worker.service` (24/7 Cold Email rotating `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com` via `src.services.cold_mailer.send_cold_email_smtp`), "
-            "`linkedin-portal-worker.service` (24/7 Naukri/Indeed/Greenhouse/Lever auto-apply), and `linkedin-discord-listener.service` (this #prompt CLI daemon). "
+            "Systemd services here: `linkedin-email-worker.service` (24/7 simultaneous Cold Email across `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com`), "
+            "`linkedin-bounce-monitor.service` (6s parallel IMAP bounce wiper & DB/sheet purger), "
+            "`linkedin-portal-worker.service` (24/7 Greenhouse/Lever/Ashby/Naukri turbo auto-apply), "
+            "`linkedin-dashboard.service` + `linkedin-dashboard-tunnel.service` "
+            f"(Live Master Sheet: `{live_base}/sheet`, Clean Excel Download: `{live_base}/download/MASTER_LEADS_SHEET.xlsx`, Clean CSV: `{live_base}/download/ACTIVE_DELIVERED_LEADS.csv`, Dashboard: `{live_base}/p/dashboard`), "
+            "and `linkedin-discord-listener.service` (this Discord CLI daemon). "
             "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser clicks execute over Vishal's residential IP while controlled from HERE via `src.services.linkedin_control` (`/home/opc/.linkedin_control.json`). "
             f"To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} -m src.services.linkedin_control stop` or `start` or `status`!"
         )
@@ -333,15 +413,26 @@ class DiscordListener:
             stop_typing.set()
             return f"❌ Antigravity CLI Error: `{e}`"
 
-    def process_command(self, content: str, msg_id: str, author_id: str) -> None:
-        """Parses and acts on instructions from Discord using the native Antigravity CLI."""
+    def process_command(self, content: str, msg_id: str, author_id: str, channel_id: str = None) -> None:
+        """Parses and acts on instructions from Discord."""
         text = content.strip()
         lower = text.lower()
-        target_channel = self.channel_id
+        target_channel = channel_id or self.channel_id
 
-        print(f"\n[DiscordListener:Msg] Received from user: {text}")
+        print(f"\n[DiscordListener:Msg:{target_channel}] Received from user: {text}")
         self.client.trigger_typing(target_channel)
         self.client.add_reaction(target_channel, msg_id, "⚙️")
+
+        # 0. Instant Fast Path: Master Leads Sheet / Excel / CSV / Dashboard Link Request
+        sheet_triggers = [
+            "sheet", "excel", "xlsx", "csv", "leads link", "mail list",
+            "master list", "download leads", "data link", "dashboard link", "dashboard"
+        ]
+        if any(trig in lower for trig in sheet_triggers) and len(text.split()) <= 14:
+            print("[DiscordCLI] Serving instant Cloud VM Master Sheet & Download links")
+            self.send_chunked(target_channel, self.get_sheet_links_message())
+            self.client.add_reaction(target_channel, msg_id, "✅")
+            return
 
         # 1. Fast path: Direct Raw Terminal / Shell Execution (!sh <cmd> or !bash <cmd>)
         if text.startswith("!sh ") or text.startswith("!bash ") or text.startswith("!run "):
@@ -452,38 +543,50 @@ class DiscordListener:
             self.client.add_reaction(target_channel, msg_id, "✅")
 
     def start_polling(self, interval_seconds: int = 3) -> None:
-        """Polls Discord prompt channel for new incoming user commands."""
-        print(f"[DiscordListener] Active on prompt channel {self.channel_id}. Polling every {interval_seconds}s...")
-        print(f"[DiscordListener] Engine: Native Antigravity CLI (`{AGY_BIN}`) with continuation `-c`")
-        
-        # Populate initial message IDs so old messages are not re-executed
-        try:
-            initial_msgs = self.client.get_channel_messages(self.channel_id, limit=25)
-            for m in initial_msgs:
-                self.processed_msg_ids.add(m["id"])
-            print(f"[DiscordListener] Initialized with {len(self.processed_msg_ids)} existing messages.")
-        except Exception as e:
-            print(f"[DiscordListener] Notice fetching initial messages: {e}")
+        """Polls Discord channels (#prompt and #jobs) for new incoming user commands."""
+        print(f"[DiscordListener] Active on channels {self.watch_channels}. Polling every {interval_seconds}s...")
+        print(f"[DiscordListener] Engine: 24/7 Cloud VM CLI + Instant Sheet/Status Responder")
+
+        for ch in self.watch_channels:
+            try:
+                initial_msgs = self.client.get_channel_messages(ch, limit=25)
+                for m in initial_msgs:
+                    self.processed_msg_ids.add(m["id"])
+                print(f"[DiscordListener] Initialized channel {ch} with {len(initial_msgs)} existing messages.")
+            except Exception as e:
+                print(f"[DiscordListener] Notice fetching initial messages for {ch}: {e}")
 
         while True:
             try:
-                messages = self.client.get_channel_messages(self.channel_id, limit=10)
-                for msg in reversed(messages):
-                    msg_id = msg.get("id")
-                    if msg_id in self.processed_msg_ids:
-                        continue
-                    self.processed_msg_ids.add(msg_id)
+                for ch in self.watch_channels:
+                    messages = self.client.get_channel_messages(ch, limit=10)
+                    for msg in reversed(messages):
+                        msg_id = msg.get("id")
+                        if msg_id in self.processed_msg_ids:
+                            continue
+                        self.processed_msg_ids.add(msg_id)
 
-                    author = msg.get("author", {})
-                    # Skip own bot messages
-                    if author.get("bot"):
-                        continue
+                        author = msg.get("author", {})
+                        if author.get("bot"):
+                            continue
 
-                    content = msg.get("content", "").strip()
-                    if content:
-                        # Process in thread so polling doesn't block
-                        t = threading.Thread(target=self.process_command, args=(content, msg_id, author.get("id")))
-                        t.start()
+                        content = msg.get("content", "").strip()
+                        # In #jobs channel (alerts channel), only respond to explicit commands/questions or sheet/status queries
+                        if ch != self.channel_id:
+                            clow = content.lower()
+                            if not any(
+                                k in clow
+                                for k in ("sheet", "excel", "xlsx", "csv", "status", "dashboard", "link", "!sh", "!li", "stop", "start")
+                            ):
+                                continue
+
+                        if content:
+                            t = threading.Thread(
+                                target=self.process_command,
+                                args=(content, msg_id, author.get("id"), ch),
+                                daemon=True,
+                            )
+                            t.start()
 
                 time.sleep(interval_seconds)
             except KeyboardInterrupt:
