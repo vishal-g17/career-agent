@@ -47,20 +47,25 @@ def get_cached_dashboard_html() -> bytes:
     return _CACHE["dash_html"]
 
 
-def ensure_fresh_exports(max_age: float = 25.0) -> None:
-    now = time.time()
-    if (
-        OUTPUT_XLSX.exists()
-        and OUTPUT_ACTIVE_CSV.exists()
-        and (now - max(_CACHE["xlsx_ts"], OUTPUT_XLSX.stat().st_mtime)) < max_age
-    ):
+def ensure_fresh_exports(max_age: float = 120.0) -> None:
+    """Serves existing Cloud VM sheet files immediately (0ms wait) and refreshes asynchronously in background if stale."""
+    if not OUTPUT_XLSX.exists() or not OUTPUT_ACTIVE_CSV.exists():
+        with _EXPORT_LOCK:
+            if not OUTPUT_XLSX.exists() or not OUTPUT_ACTIVE_CSV.exists():
+                export_split_leads()
+                _CACHE["xlsx_ts"] = time.time()
         return
-    with _EXPORT_LOCK:
-        now2 = time.time()
-        if OUTPUT_XLSX.exists() and (now2 - _CACHE["xlsx_ts"]) < max_age:
-            return
-        export_split_leads()
-        _CACHE["xlsx_ts"] = time.time()
+
+    age = time.time() - OUTPUT_XLSX.stat().st_mtime
+    if age > max_age and not _EXPORT_LOCK.locked():
+        def _bg():
+            with _EXPORT_LOCK:
+                try:
+                    export_split_leads()
+                    _CACHE["xlsx_ts"] = time.time()
+                except Exception:
+                    pass
+        threading.Thread(target=_bg, daemon=True).start()
 
 
 def build_live_sheet_html() -> str:
