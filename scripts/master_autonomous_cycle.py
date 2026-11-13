@@ -678,17 +678,20 @@ def send_discord_cycle_note(message: str) -> None:
 
 
 def run_feed_scan_stage(conn=None, duration_minutes: float = 10.0) -> int:
-    """Scans LinkedIn personal feed & hiring posts (post body ONLY, never comments) for ~duration_minutes."""
+    """Scans LinkedIn personal feed & hiring posts (post body ONLY, never comments) in an isolated subprocess."""
     print(f"[Cycle:Feed] Executing {duration_minutes:.1f}-minute personal feed & hiring post hunt (post bodies only)...")
-    leads_count = 0
     try:
-        leads = scan_personal_feed_for_jobs(duration_minutes=duration_minutes)
-        leads_count = len(leads or [])
+        feed_py = (
+            f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
+            f"from src.agents.feed_scanner import scan_personal_feed_for_jobs; "
+            f"scan_personal_feed_for_jobs(duration_minutes={float(duration_minutes):.2f})"
+        )
+        subprocess.run([sys.executable, "-u", "-c", feed_py], timeout=int(duration_minutes * 60 + 240))
         if conn is not None:
             sync_new_outreach_leads_to_cloud_vm(conn)
     except Exception as fe:
         print(f"[Cycle:Feed] Feed scan error: {fe}")
-    return leads_count
+    return 1
 
 
 def run_connection_or_feed_branch(page, context, conn, window_minutes: float = 10.0) -> None:
@@ -768,9 +771,13 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
         "• Applying sequentially to matching APM / Product / Business Analyst roles (verified post-submit confirmations only)."
     )
     try:
-        from src.agents.linkedin_job_applicant import apply_linkedin_jobs_stage
-        applied_jobs = apply_linkedin_jobs_stage(duration_minutes=10, max_apps=8)
-        print(f"[InterBatch:Jobs] Stage C finished: {applied_jobs} strictly confirmed LinkedIn Easy Apply submission(s).")
+        jobs_py = (
+            f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
+            "from src.agents.linkedin_job_applicant import apply_linkedin_jobs_stage; "
+            "n = apply_linkedin_jobs_stage(duration_minutes=10, max_apps=8); "
+            "print(f'[InterBatch:Jobs] Stage C finished: {n} strictly confirmed LinkedIn Easy Apply submission(s).')"
+        )
+        subprocess.run([sys.executable, "-u", "-c", jobs_py], timeout=840)
     except Exception as jae:
         print(f"[InterBatch:Jobs] Note: {jae}")
 
