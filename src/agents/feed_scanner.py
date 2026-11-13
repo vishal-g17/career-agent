@@ -1,5 +1,6 @@
 import time
 import re
+import random
 import urllib.parse
 import sqlite3
 from typing import List, Dict, Any
@@ -219,11 +220,11 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
                 set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="feed_scanner")
                 return []
 
-            for _ in range(10):
+            for _ in range(random.randint(7, 13)):
                 if time.time() >= deadline or not sync_control_with_cloud().get("linkedin_enabled", True):
                     break
-                page.mouse.wheel(0, 1100)
-                page.wait_for_timeout(3500)
+                page.mouse.wheel(0, random.randint(720, 1450))
+                page.wait_for_timeout(random.randint(2400, 5800))
 
             main_text_feed = _extract_post_bodies_no_comments(page)
             feed_leads = _extract_leads_from_text(main_text_feed, "Personal Feed")
@@ -237,6 +238,7 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
                 'hiring ("founder\'s office" OR "product manager") ("send resume" OR "mail" OR "@")',
                 '("hiring" OR "open role") ("data analyst" OR "operations analyst") India',
             ]
+            random.shuffle(search_queries)
 
             for query in search_queries:
                 if time.time() >= deadline or not sync_control_with_cloud().get("linkedin_enabled", True):
@@ -245,16 +247,16 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
                     search_url = f"https://www.linkedin.com/search/results/content/?keywords={urllib.parse.quote(query)}&sortBy=%22date_posted%22"
                     print(f"\n[FeedScanner] Stage 2: Searching LinkedIn Posts for: {query}...")
                     page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
-                    page.wait_for_timeout(3500)
+                    page.wait_for_timeout(random.randint(2800, 5200))
                     if is_linkedin_logged_out(page):
                         set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="feed_scanner")
                         return all_leads
 
-                    for _ in range(10):
+                    for _ in range(random.randint(6, 12)):
                         if time.time() >= deadline or not sync_control_with_cloud().get("linkedin_enabled", True):
                             break
-                        page.mouse.wheel(0, 1100)
-                        page.wait_for_timeout(4000)
+                        page.mouse.wheel(0, random.randint(700, 1400))
+                        page.wait_for_timeout(random.randint(2600, 6200))
 
                     search_text = _extract_post_bodies_no_comments(page)
                     post_leads = _extract_leads_from_text(search_text, f"Post Search: {query}")

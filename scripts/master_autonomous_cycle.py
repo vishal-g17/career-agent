@@ -275,8 +275,9 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         )
 
         composer.click()
+        page.wait_for_timeout(random.randint(600, 1800))
         page.keyboard.insert_text(msg)
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(random.randint(1200, 3400))
 
         # Click Send and verify dispatch
         send_btn = page.locator('button.msg-form__send-button, button[type="submit"]:has-text("Send"), button:has-text("Send")').first
@@ -742,46 +743,105 @@ def run_connection_or_feed_branch(page, context, conn, window_minutes: float = 1
 
 
 def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
-    """Executes sequentially (1 task at a time) after every 10-message batch:
-    1. Stage B (10 min): Connection Limit Check -> Send Connections for 10 min OR Scrape Feed (post body only) for 10 min.
-    2. Stage C (10 min): Apply in LinkedIn Jobs section for 10 minutes (strict receipt verification).
-    3. Quick acceptance check before starting next 10-message batch.
+    """Executes organic randomized waits & sequential stages after each message batch:
+    1. Random Wait #1 (< 20m: 4–17.5m) + Connection Request Limit Test (if renewed, sends invites at random 48–115s gaps).
+    2. Random Wait #2 (1.5–5m) + Randomized Feed Hunt (5.5–11.5m, post bodies ONLY, never comments).
+    3. Random Wait #3 (1.5–5m) + Randomized LinkedIn Jobs Apply (6–12m, strict receipt verification).
+    4. Random Cool-Down (1.5–4.5m) before starting the next randomized message batch.
     """
+    wait1_mins = round(random.uniform(4.0, 17.5), 1)
+    feed_gap_mins = round(random.uniform(1.5, 5.0), 1)
+    feed_dur_mins = round(random.uniform(5.5, 11.5), 1)
+    jobs_gap_mins = round(random.uniform(1.5, 5.0), 1)
+    jobs_dur_mins = random.randint(6, 12)
+    jobs_max_apps = random.randint(4, 7)
+    end_gap_mins = round(random.uniform(1.5, 4.5), 1)
+
     print("\n" + "="*70)
-    print(f"🔄 BATCH #{batch_num} COMPLETE -> STARTING SEQUENTIAL STAGE B (10m) & STAGE C (10m)")
+    print(
+        f"🎲 BATCH #{batch_num} COMPLETE -> RANDOMIZED ANTI-PATTERN SCHEDULE:\n"
+        f"  • Gap #1 + Connection Test: ~{wait1_mins}m (<20m) | Feed Gap: ~{feed_gap_mins}m -> Feed Hunt: ~{feed_dur_mins}m\n"
+        f"  • Jobs Gap: ~{jobs_gap_mins}m -> Jobs Apply: ~{jobs_dur_mins}m | Pre-Batch Breather: ~{end_gap_mins}m"
+    )
     print("="*70)
 
-    # Stage B: Connection Limit Check -> 10m Connections OR 10m Feed Scrape (post bodies only)
-    if not sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage B (10m Feed/Connect)", force=True).get("linkedin_enabled", True):
+    # 1. Random Gap (<20 min) + Connection Limit Test
+    pre_test_s = wait1_mins * 60.0 * random.uniform(0.45, 0.7)
+    post_test_s = (wait1_mins * 60.0) - pre_test_s
+    print(f"[InterBatch:Wait1] Resting randomly for {pre_test_s/60.0:.1f}m before testing connection limit...")
+    sync_control_with_cloud(stage_info=f"Batch #{batch_num} Random Cool-Down ({wait1_mins}m) + Connection Test", force=True)
+    if not _sleep_respecting_control(pre_test_s):
         return
     if is_linkedin_logged_out(page):
         _handle_linkedin_logout(page)
         return
-    run_connection_or_feed_branch(page, context, conn, window_minutes=10.0)
 
-    # Stage C: LinkedIn Jobs Section Application for 10 minutes
-    if not sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage C (10m Jobs Apply)", force=True).get("linkedin_enabled", True):
+    print("[ConnectionLimitCheck] Testing 1 connection invite during <20m randomized window...")
+    res = discover_and_send_poc_invitation(page, context, conn)
+    if res is True:
+        sent_invites = 1
+        invite_window_end = time.time() + max(post_test_s, random.uniform(300, 660))
+        send_discord_cycle_note(
+            "🎉 **Connection Limit Check: ALLOWED!**\n"
+            f"• Invitation #1 sent; continuing with random `48–115s` gaps during this randomized window."
+        )
+        while time.time() < invite_window_end - 50:
+            if not _sleep_respecting_control(random.uniform(48, 115)):
+                return
+            r = discover_and_send_poc_invitation(page, context, conn)
+            if r is True:
+                sent_invites += 1
+            elif r == "LIMIT_REACHED":
+                print(f"[ConnectionLimitCheck] Limit reached after {sent_invites} invite(s).")
+                break
+            else:
+                time.sleep(random.uniform(8, 18))
+    else:
+        print(f"[InterBatch:Wait1] Connection limit still active -> completing remaining {post_test_s/60.0:.1f}m of <20m random gap...")
+        if not _sleep_respecting_control(post_test_s):
+            return
+
+    # 2. Random Gap #2 -> Randomized Feed Post-Body Hunt
+    print(f"[InterBatch:FeedGap] Random transition wait of {feed_gap_mins}m before Feed Scrape...")
+    sync_control_with_cloud(stage_info=f"Batch #{batch_num} Random Gap ({feed_gap_mins}m) -> Feed Hunt ({feed_dur_mins}m)", force=True)
+    if not _sleep_respecting_control(feed_gap_mins * 60.0):
         return
     if is_linkedin_logged_out(page):
         _handle_linkedin_logout(page)
         return
-    print("[InterBatch:Jobs] Stage C -> Applying in LinkedIn Jobs section for 10 minutes (strict confirmation only)...")
+
     send_discord_cycle_note(
-        "💼 **Stage C — LinkedIn Jobs Section (10-Minute Window)**\n"
-        "• Applying sequentially to matching APM / Product / Business Analyst roles (verified post-submit confirmations only)."
+        f"🔄 **Stage B — Randomized Feed & Post Hunt (~{feed_dur_mins} min)**\n"
+        "• Extracting recruiter emails strictly from post bodies (ignoring comments) with randomized scroll cadence."
+    )
+    run_feed_scan_stage(conn=conn, duration_minutes=feed_dur_mins)
+
+    # 3. Random Gap #3 -> Randomized LinkedIn Jobs Section
+    print(f"[InterBatch:JobsGap] Random transition wait of {jobs_gap_mins}m before LinkedIn Jobs section...")
+    sync_control_with_cloud(stage_info=f"Batch #{batch_num} Random Gap ({jobs_gap_mins}m) -> Jobs Apply ({jobs_dur_mins}m)", force=True)
+    if not _sleep_respecting_control(jobs_gap_mins * 60.0):
+        return
+    if is_linkedin_logged_out(page):
+        _handle_linkedin_logout(page)
+        return
+
+    print(f"[InterBatch:Jobs] Stage C -> Applying in LinkedIn Jobs section for ~{jobs_dur_mins}m (max {jobs_max_apps} verified apps)...")
+    send_discord_cycle_note(
+        f"💼 **Stage C — Randomized LinkedIn Jobs Window (~{jobs_dur_mins} min)**\n"
+        "• Applying sequentially to matching APM / Product / Business Analyst roles (verified confirmations only)."
     )
     try:
         jobs_py = (
             f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
             "from src.agents.linkedin_job_applicant import apply_linkedin_jobs_stage; "
-            "n = apply_linkedin_jobs_stage(duration_minutes=10, max_apps=8); "
+            f"n = apply_linkedin_jobs_stage(duration_minutes={jobs_dur_mins}, max_apps={jobs_max_apps}); "
             "print(f'[InterBatch:Jobs] Stage C finished: {n} strictly confirmed LinkedIn Easy Apply submission(s).')"
         )
-        subprocess.run([sys.executable, "-u", "-c", jobs_py], timeout=840)
+        subprocess.run([sys.executable, "-u", "-c", jobs_py], timeout=int(jobs_dur_mins * 60 + 240))
     except Exception as jae:
         print(f"[InterBatch:Jobs] Note: {jae}")
 
-    # Check if any previously invited POCs accepted before starting next 10-msg batch
+    # 4. Acceptance check + Pre-Batch Random Cool-Down
     try:
         new_accepts = check_and_message_accepted_connections(page, conn)
         if new_accepts > 0:
@@ -789,18 +849,22 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     except Exception:
         pass
 
+    print(f"[InterBatch:CoolDown] Random pre-batch breather of {end_gap_mins}m before next message batch...")
+    if not _sleep_respecting_control(end_gap_mins * 60.0):
+        return
+
     print("="*70)
-    print(f"✅ Cycle #{batch_num} complete. Looping back to Stage A (Next 10-Message Batch, 1-min gap)!")
+    print(f"✅ Cycle #{batch_num} complete. Looping back to Stage A (Next Randomized Message Batch, <2m random gaps)!")
     print("="*70 + "\n")
     send_discord_cycle_note(
-        f"🔁 **Cycle #{batch_num} Complete** — Restarting **Stage A: Next 10 LinkedIn Messages (1-min gap)**."
+        f"🔁 **Cycle #{batch_num} Complete** — Starting next randomized message batch (`<2 min` random gaps)."
     )
 
 # -------------------------------------------------------------
 # MASTER CONTINUOUS CYCLE (1 TASK AT A TIME SEQUENTIAL LOOP)
 # -------------------------------------------------------------
 IST = timezone(timedelta(hours=5, minutes=30))
-DAILY_MAX_1ST_DEGREE = 80       # Paced safely across the day (8 full 10-msg cycles/day)
+DAILY_MAX_1ST_DEGREE = 80       # Paced safely across the day
 
 # LinkedIn Temporary Suspension Cooldown (12 Nov 10:37 AM PST = 13 Nov 00:07 AM IST)
 LINKEDIN_SUSPEND_UNTIL = datetime(2026, 11, 13, 0, 7, 0, tzinfo=IST)
@@ -817,9 +881,9 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
     conn = sqlite3.connect(DB_PATH)
 
     print("\n" + "="*80)
-    print("🚀 LINKEDIN 1-TASK-AT-A-TIME SEQUENTIAL MASTER CYCLE")
+    print("🚀 LINKEDIN RANDOMIZED ANTI-PATTERN SEQUENTIAL MASTER CYCLE")
     print("Operating Window: 10:00 AM - 11:00 PM IST")
-    print("Cycle: [Stage A] 10 Msgs (1-min gap) -> [Stage B] 10m Connections OR Feed Hunt (post body only) -> [Stage C] 10m LinkedIn Jobs -> Repeat")
+    print("Cycle: [Stage A] 8-11 Msgs (<2m random gap) -> [<20m Random Gap + Connect Test] -> [Random Gap + Feed Hunt] -> [Random Gap + Jobs] -> Repeat")
     print("="*80 + "\n")
 
     with sync_playwright() as p:
@@ -831,7 +895,10 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
             WHERE date(sent_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
         ''')
         init_today = init_cur.fetchone()[0]
+        batch_target = random.randint(8, 11)
         batch_msg_count = init_today % 10
+        if batch_msg_count >= batch_target:
+            batch_target = batch_msg_count + 1
         batch_num = (init_today // 10) + 1
         browser = None
         context = None
@@ -896,16 +963,17 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 if start_inter_batch:
                     start_inter_batch = False
                     run_inter_batch_activities(page, context, conn, batch_num=max(1, batch_num - 1))
+                    batch_target = random.randint(8, 11)
                     continue
 
-                sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage A ({batch_msg_count}/10 msgs | {daily_1st_sent} today)")
-                print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/10) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
+                sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage A ({batch_msg_count}/{batch_target} msgs | {daily_1st_sent} today)")
+                print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/{batch_target}) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
                 # STAGE 0: Queue Check & Auto-Refill if low (only between batches or when critically low)
                 if queue_pending < 5:
                     refill_connections_queue(page, conn, min_needed=30, max_scrolls=140)
 
-                # STAGE A: 1st-Degree Messaging (10 messages at 1-minute gap, strictly 1 task at a time)
+                # STAGE A: 1st-Degree Messaging (Randomized batch size & <2 min random gap, 1 task at a time)
                 if daily_1st_sent < DAILY_MAX_1ST_DEGREE:
                     cur.execute('''
                         SELECT id, name, headline FROM linkedin_connections_queue 
@@ -917,7 +985,7 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                     if row:
                         username, name, headline = row
                         first_name = name.split()[0] if name else "there"
-                        print(f"[Cycle:StageA] Batch #{batch_num} Msg {batch_msg_count + 1}/10 -> {name} ({headline[:40]}...)")
+                        print(f"[Cycle:StageA] Batch #{batch_num} Msg {batch_msg_count + 1}/{batch_target} -> {name} ({headline[:40]}...)")
                         success = turbo_send_1st_degree(page, username, first_name)
                         if not sync_control_with_cloud().get("linkedin_enabled", True):
                             continue
@@ -931,34 +999,37 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                             messages_sent_session += 1
                             batch_msg_count += 1
 
-                            if messages_sent_session == 1 or batch_msg_count in (1, 10):
+                            if messages_sent_session == 1 or batch_msg_count in (1, batch_target):
                                 send_discord_cycle_note(
-                                    f"📨 **Stage A — LinkedIn Message Sent ({batch_msg_count}/10 in Batch #{batch_num})**\n"
+                                    f"📨 **Stage A — LinkedIn Message Sent ({batch_msg_count}/{batch_target} in Batch #{batch_num})**\n"
                                     f"• Recipient: **{name}** (`{username}`)\n"
                                     f"• Attachment: CV PDF + Drive Link | Verified composer cleared ✅"
                                 )
 
-                            if batch_msg_count >= 10:
-                                print(f"[Cycle:StageA] Completed 10/10 messages in Batch #{batch_num}! Moving to Stage B & Stage C...")
+                            if batch_msg_count >= batch_target:
+                                print(f"[Cycle:StageA] Completed {batch_msg_count}/{batch_target} messages in Batch #{batch_num}! Entering randomized inter-batch cycle...")
                                 run_inter_batch_activities(page, context, conn, batch_num=batch_num)
                                 batch_msg_count = 0
+                                batch_target = random.randint(8, 11)
                                 batch_num += 1
                             else:
-                                delay_s = random.uniform(55, 68)
-                                print(f"[Cycle:StageA] 1-minute gap: resting {int(delay_s)}s before Message {batch_msg_count + 1}/10...")
+                                # Randomized wait strictly under 2 minutes (42s - 115s)
+                                delay_s = random.uniform(42.0, 115.0)
+                                print(f"[Cycle:StageA] Random <2m gap: resting {int(delay_s)}s before Message {batch_msg_count + 1}/{batch_target}...")
                                 _sleep_respecting_control(delay_s)
                         else:
                             cur.execute("UPDATE linkedin_connections_queue SET status='skipped' WHERE id=?", (username,))
                             conn.commit()
-                            time.sleep(2)
+                            time.sleep(random.uniform(2.0, 5.5))
                         continue
                     else:
-                        print("[Cycle:StageA] Queue empty after refill attempt; running Stage B & Stage C directly...")
+                        print("[Cycle:StageA] Queue empty after refill attempt; running randomized inter-batch stages...")
                         run_inter_batch_activities(page, context, conn, batch_num=batch_num)
+                        batch_target = random.randint(8, 11)
                         batch_num += 1
                         continue
                 else:
-                    print(f"[Cycle:StageA] Daily safe cap ({DAILY_MAX_1ST_DEGREE}) reached for 1st-degree messages. Continuing Stage B (Feed Hunt) + Stage C (Jobs) loop...")
+                    print(f"[Cycle:StageA] Daily safe cap ({DAILY_MAX_1ST_DEGREE}) reached for 1st-degree messages. Continuing randomized Feed + Jobs loop...")
                     run_inter_batch_activities(page, context, conn, batch_num=batch_num)
                     batch_num += 1
                     continue
