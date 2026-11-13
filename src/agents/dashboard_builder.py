@@ -156,7 +156,7 @@ def build_dashboard_html() -> str:
             <td><span class="badge badge-channel">{html_lib.escape(applied_via)}</span></td>
             <td style="color:#3fb950; font-weight:600;"><span class="badge badge-success">✓ APPLIED</span></td>
             <td style="color:#8b949e; font-size:0.8rem;">{j['created_at'][:16] if j['created_at'] else 'Recent'}</td>
-            <td><a href="{j['url']}" target="_blank" class="action-btn">View Job &rarr;</a></td>
+            <td><a href="{j['url']}" target="_blank" rel="noopener noreferrer" class="action-btn">View Job &rarr;</a></td>
         </tr>
         """
 
@@ -218,7 +218,7 @@ def build_dashboard_html() -> str:
             <ul style="margin:0.5rem 0 0.8rem 1.2rem; color:#8b949e; font-size:0.82rem;">{reasons_html}</ul>
             <div style="display:flex; justify-content:space-between; align-items:center; border-top:1px solid #282d37; padding-top:0.6rem;">
                 <span style="color:#8b949e; font-size:0.75rem;">{j['posted_at'] or 'Recent'}</span>
-                <a href="{j['url']}" target="_blank" class="action-btn">Apply Now &rarr;</a>
+                <a href="{j['url']}" target="_blank" rel="noopener noreferrer" class="action-btn">Apply Now &rarr;</a>
             </div>
         </div>
         """
@@ -393,11 +393,11 @@ tr.table-row:hover {{ background: rgba(56, 189, 248, 0.04); }}
     <!-- CONTROLS & TABS -->
     <div class="controls-bar">
         <div class="tab-group">
-            <button class="tab-btn active" onclick="switchTab('applied')">🎯 Applied Jobs ({total_applied})</button>
-            <button class="tab-btn" onclick="switchTab('replies')">💬 Inbound Replies ({total_replies})</button>
-            <button class="tab-btn" onclick="switchTab('outreach')">✉️ Cold Outreach ({total_emails_sent})</button>
-            <button class="tab-btn" onclick="switchTab('linkedin')">🤝 LinkedIn 1st-Degree ({total_li_sent})</button>
-            <button class="tab-btn" onclick="switchTab('pipeline')">🔍 Fresh Job Matches</button>
+            <button class="tab-btn active" onclick="switchTab('applied', this)">🎯 Applied Jobs ({total_applied})</button>
+            <button class="tab-btn" onclick="switchTab('replies', this)">💬 Inbound Replies ({total_replies})</button>
+            <button class="tab-btn" onclick="switchTab('outreach', this)">✉️ Cold Outreach ({total_emails_sent})</button>
+            <button class="tab-btn" onclick="switchTab('linkedin', this)">🤝 LinkedIn 1st-Degree ({total_li_sent})</button>
+            <button class="tab-btn" onclick="switchTab('pipeline', this)">🔍 Fresh Job Matches</button>
         </div>
         <input type="text" id="tableSearch" class="search-box" placeholder="🔍 Instant search company or role..." onkeyup="filterTables()">
     </div>
@@ -485,12 +485,17 @@ tr.table-row:hover {{ background: rgba(56, 189, 248, 0.04); }}
 </div>
 
 <script>
-function switchTab(tabId) {{
-    document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+function switchTab(tabId, btn) {{
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-    event.target.classList.add('active');
-    document.getElementById('tab-' + tabId).classList.add('active');
+    if (btn) {{
+        btn.classList.add('active');
+    }}
+    let target = document.getElementById('tab-' + tabId);
+    if (target) {{
+        target.classList.add('active');
+    }}
 }}
 
 function filterTables() {{
@@ -521,8 +526,9 @@ def publish_dashboard_to_folio(doc_id: str = "dashboard") -> str:
         "visibility": "public",
         "folder": "analytics",
         "tags": ["dashboard", "live", "tracking", "applied", "outreach", "replies"],
-        "created": datetime.utcnow().isoformat() + "Z",
-        "updated": datetime.utcnow().isoformat() + "Z"
+        "sandbox": False,
+        "created": datetime.now().isoformat() + "Z",
+        "updated": datetime.now().isoformat() + "Z"
     }
 
     with open(os.path.join(doc_dir, "meta.json"), "w", encoding="utf-8") as f:
