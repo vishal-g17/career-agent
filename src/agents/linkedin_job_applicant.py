@@ -70,8 +70,15 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 6) -> 
                         try: cb.click()
                         except: pass
 
-                    # Find job cards
-                    job_cards = page.locator('div.job-card-container, div[data-job-id]').all()
+                    # Find job cards (wait for LinkedIn Jobs list React hydration)
+                    card_sel = 'li[data-occludable-job-id], div.job-card-container, [data-job-id], li.jobs-search-results__list-item'
+                    try:
+                        page.locator(card_sel).first.wait_for(state="visible", timeout=7000)
+                    except Exception:
+                        pass
+                    job_cards = page.locator(card_sel).all()
+                    if not job_cards:
+                        job_cards = page.locator('main a[href*="/jobs/view/"]').all()
                     print(f"[LinkedInJobs] Found {len(job_cards)} job cards for '{kw}'")
 
                     for card in job_cards[:8]:
