@@ -324,7 +324,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
         notifier = DiscordNotifier()
         message_ids = msg_nums[0].split()
 
-        for m_id in reversed(message_ids[-35:]):
+        for m_id in reversed(message_ids[-250:]):
             res, data = mail.fetch(m_id, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
             if res != "OK" or not data or not data[0]:
                 continue

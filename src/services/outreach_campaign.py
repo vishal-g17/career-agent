@@ -238,112 +238,154 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
         "results": results,
     }
 
-def process_pending_followups(max_followups: int = 15) -> Dict[str, Any]:
+def process_pending_followups(max_followups: int = 20) -> Dict[str, Any]:
     """
-    Scans for leads that have received outreach, haven't replied, and are due for follow-ups.
-    Follow-up 1: 3 days after initial send.
-    Follow-up 2: 4 days after Follow-up 1.
-    Strictly uses the same sender email address that initiated the original thread.
+    Scans for leads that have received outreach, haven't replied, and are due for follow-ups:
+      - Follow-up #1: 3 days (72h) after initial send (`first_sent_at <= datetime('now', '-3 days')`)
+      - Follow-up #2: 4 days (96h) after Follow-up #1 (`followup_1_at <= datetime('now', '-4 days')`)
+    Strictly uses the exact same sender email address that initiated the original thread,
+    respects daily caps (1,500 NSUT / 500 Gmail), and skips any bounced/excluded/replied leads.
     """
     conn = database.get_connection()
-    fu1_sent = 0
-    fu2_sent = 0
+    today_counts = get_today_sender_counts(conn)
 
-    # 1. Process Follow-up 1 (Due after 3 days)
-    fu1_leads = conn.execute(
+    fu1_rows = conn.execute(
         """
         SELECT * FROM outreach_leads 
-        WHERE status = 'sent' AND followup_count = 0 
+        WHERE status = 'sent' AND COALESCE(followup_count, 0) = 0 
+          AND first_sent_at IS NOT NULL
           AND first_sent_at <= datetime('now', '-3 days')
+        ORDER BY first_sent_at ASC
         LIMIT ?
         """,
-        (max_followups,)
+        (max_followups,),
     ).fetchall()
 
-    for lead in fu1_leads:
-        lead_id = lead["id"]
-        name = lead["name"] or "Hiring Team"
-        email_addr = lead["email"]
-        company = lead["company"] or "Your Team"
-        sender_email = lead["sender_email"] or getattr(config, "COLLEGE_EMAIL_ADDRESS", "vishal.gupta.ug22@nsut.ac.in")
-        last_subj = lead["last_subject"] or f"Application for APM | Vishal Gupta | Immediate Joinee"
-
-        subject = f"Re: {last_subj}"
-        body = f"""Hi {name},
-
-Following up on my previous note. I'm actively exploring APM and Product / Tech Analyst opportunities where I can apply my operational data engineering and growth telemetry background.
-
-I’d love to connect if you have 5 minutes or if there’s a relevant team member you could introduce me to.
-
-Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing
-Portfolio: https://vishalgupta.vercel.app/
-
-Best regards,
-Vishal Gupta
-📞 +91 8368387245
-✉️ {sender_email}
-🔗 https://www.linkedin.com/in/vshal-g007"""
-
-        success = send_cold_email_smtp(email_addr, subject, body, sender_email=sender_email)
-        if success:
-            with database.get_connection() as c:
-                c.execute(
-                    """
-                    UPDATE outreach_leads 
-                    SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    """,
-                    (lead_id,)
-                )
-            fu1_sent += 1
-            time.sleep(random.randint(45, 60))
-
-    # 2. Process Follow-up 2 (Due after 4 days from FU1)
-    fu2_leads = conn.execute(
+    fu2_rows = conn.execute(
         """
         SELECT * FROM outreach_leads 
         WHERE status = 'sent' AND followup_count = 1 
+          AND followup_1_at IS NOT NULL
           AND followup_1_at <= datetime('now', '-4 days')
+        ORDER BY followup_1_at ASC
         LIMIT ?
         """,
-        (max_followups,)
+        (max_followups,),
     ).fetchall()
+    conn.close()
 
-    for lead in fu2_leads:
+    tasks = [(1, dict(r)) for r in fu1_rows] + [(2, dict(r)) for r in fu2_rows]
+    if not tasks:
+        return {"followup_1_sent": 0, "followup_2_sent": 0, "due_remaining": 0}
+
+    fu1_sent = 0
+    fu2_sent = 0
+    default_sender = getattr(config, "COLLEGE_EMAIL_ADDRESS", "vishal.gupta.ug22@nsut.ac.in")
+
+    for stage, lead in tasks:
         lead_id = lead["id"]
-        name = lead["name"] or "Hiring Team"
-        email_addr = lead["email"]
-        company = lead["company"] or "Your Team"
-        sender_email = lead["sender_email"] or getattr(config, "COLLEGE_EMAIL_ADDRESS", "vishal.gupta.ug22@nsut.ac.in")
-        last_subj = lead["last_subject"] or f"Application for APM | Vishal Gupta | Immediate Joinee"
+        name = (lead.get("name") or "Hiring Team").strip()
+        email_addr = (lead.get("email") or "").strip()
+        company = (lead.get("company") or "Your Team").strip()
+        raw_sender = (lead.get("sender_email") or default_sender).split(",")[0].strip()
+        sender_email = raw_sender if "@" in raw_sender else default_sender
 
-        subject = f"Re: {last_subj}"
-        body = f"""Hi {name},
+        if is_bounced_or_discarded(email_addr):
+            record_bounced_email(email_addr, "Pre-followup bounce blocklist")
+            continue
+        excl = is_excluded(name=name, headline=f"{company} {email_addr}")
+        if excl:
+            record_bounced_email(email_addr, f"Excluded: {excl}")
+            continue
 
-I know things get busy, so I'll keep this brief. If your team is currently hiring or anticipating hiring for product / analyst roles in the coming quarter, I'd appreciate keeping my profile on file.
+        # Enforce daily sender cap (shared with fresh sends)
+        cap = get_sender_daily_cap(sender_email)
+        if today_counts.get(sender_email.lower(), 0) >= cap:
+            continue
 
-Wishing you and the {company} team continued growth!
+        # Double-check live status right before SMTP send in case a reply or bounce arrived moments ago
+        with database.get_connection() as chk_c:
+            cur_row = chk_c.execute("SELECT status FROM outreach_leads WHERE id = ?", (lead_id,)).fetchone()
+            if not cur_row or cur_row["status"] != "sent":
+                continue
 
-Best regards,
-Vishal Gupta
-📞 +91 8368387245
-✉️ {sender_email}
-🔗 https://www.linkedin.com/in/vshal-g007"""
+        last_subj = (lead.get("last_subject") or "").strip() or (
+            "Application: Business / Product Analyst / Management — Vishal Gupta (1 yr exp | NSUT Delhi | Immediate Joiner)"
+        )
+        subject = last_subj if last_subj.lower().startswith("re:") else f"Re: {last_subj}"
 
-        success = send_cold_email_smtp(email_addr, subject, body, sender_email=sender_email)
-        with database.get_connection() as c:
-            c.execute(
-                """
-                UPDATE outreach_leads 
-                SET followup_count = 2, followup_2_at = CURRENT_TIMESTAMP, status = 'unresponsive'
-                WHERE id = ?
-                """,
-                (lead_id,)
+        if stage == 1:
+            body = (
+                f"Hi {name},\n\n"
+                "Following up briefly on my previous note in case it got buried. I’m an immediate joiner (15 days) from NSUT Delhi "
+                "with 1 year of hands-on experience across product analytics, conversion optimization, merchant growth, and Python/SQL automation.\n\n"
+                f"If there are any openings across Product Analyst, Business Analyst, APM, or Founder's Office roles at {company}, "
+                "I’d be grateful for a quick chat or pointer to the right hiring manager.\n\n"
+                "Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n"
+                "Portfolio: https://vishalgupta.vercel.app/\n\n"
+                "Best regards,\n"
+                "Vishal Gupta\n"
+                "📞 +91 8368387245\n"
+                f"✉️ {sender_email}\n"
+                "🔗 https://www.linkedin.com/in/vshal-g007"
             )
-        fu2_sent += 1
-        time.sleep(random.randint(45, 60))
+        else:
+            body = (
+                f"Hi {name},\n\n"
+                "Sending one final quick follow-up so I don't crowd your inbox. If your team is hiring or planning to hire for "
+                "Product / Business / Data Analyst or APM roles in the coming weeks, I’d love to be considered.\n\n"
+                f"Wishing you and the {company} team continued growth!\n\n"
+                "Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n\n"
+                "Best regards,\n"
+                "Vishal Gupta\n"
+                "📞 +91 8368387245\n"
+                f"✉️ {sender_email}\n"
+                "🔗 https://www.linkedin.com/in/vshal-g007"
+            )
 
-    return {"followup_1_sent": fu1_sent, "followup_2_sent": fu2_sent}
+        ok = send_cold_email_smtp(email_addr, subject, body, sender_email=sender_email)
+        if ok:
+            today_counts[sender_email.lower()] = today_counts.get(sender_email.lower(), 0) + 1
+            with database.get_connection() as c:
+                if stage == 1:
+                    c.execute(
+                        """
+                        UPDATE outreach_leads 
+                        SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, last_subject = ?
+                        WHERE id = ? AND status = 'sent'
+                        """,
+                        (subject, lead_id),
+                    )
+                    fu1_sent += 1
+                    print(f"[FollowUp #1] ✅ Sent on thread via {sender_email} -> {name} ({company}, {email_addr})")
+                else:
+                    c.execute(
+                        """
+                        UPDATE outreach_leads 
+                        SET followup_count = 2, followup_2_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, status = 'unresponsive'
+                        WHERE id = ? AND status = 'sent'
+                        """,
+                        (lead_id,),
+                    )
+                    fu2_sent += 1
+                    print(f"[FollowUp #2] ✅ Final follow-up sent via {sender_email} -> {name} ({company}, {email_addr})")
+            time.sleep(round(random.uniform(5.5, 18.5), 1))
+        else:
+            record_bounced_email(email_addr, "Follow-up SMTP failure / bounce")
+
+    with database.get_connection() as rem_c:
+        due_rem = rem_c.execute(
+            """
+            SELECT COUNT(*) FROM outreach_leads
+            WHERE status = 'sent'
+              AND (
+                  (COALESCE(followup_count, 0) = 0 AND first_sent_at <= datetime('now', '-3 days'))
+                  OR (followup_count = 1 AND followup_1_at <= datetime('now', '-4 days'))
+              )
+            """
+        ).fetchone()[0]
+
+    return {"followup_1_sent": fu1_sent, "followup_2_sent": fu2_sent, "due_remaining": due_rem}
 
 def get_campaign_stats() -> Dict[str, Any]:
     """
