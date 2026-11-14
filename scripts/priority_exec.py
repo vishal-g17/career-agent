@@ -448,6 +448,28 @@ def run_priority_apply(args) -> str:
         out = dispatch_and_wait_mac("linkedin_apply", {"url": url}, channel_id=args.channel, timeout_s=45.0)
         return ("\n\n".join(notes + [out])).strip()
 
+    # 2b. Instahyre Job URL -> Instant 1-Click Verified REST API Apply (0s browser startup, works 24/7 on Cloud & Mac!)
+    if "instahyre.com/" in url.lower():
+        from src.services.instahyre_service import apply_instahyre_url
+        ih_res = apply_instahyre_url(url)
+        if ih_res.get("confirmed"):
+            return "\n\n".join(
+                notes
+                + [
+                    f"✅ **Instahyre Application Submitted & Confirmed Immediately!**\n"
+                    f"• **Company & Role:** `{ih_res.get('company')} — {ih_res.get('title')}`\n"
+                    f"• **URL:** {ih_res.get('url')}\n"
+                    f"• **Details:** `{ih_res.get('details')}`"
+                ]
+            )
+        return "\n\n".join(
+            notes
+            + [
+                f"⚠️ **Instahyre Application Not Confirmed (`{ih_res.get('error')}`):**\n"
+                f"• **URL:** {url}"
+            ]
+        )
+
     # 3. Google Forms (forms.gle / docs.google.com/forms)
     if "forms.gle" in url.lower() or "docs.google.com/forms" in url.lower():
         from src.services.google_form_filler import fill_google_form

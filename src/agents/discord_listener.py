@@ -140,7 +140,7 @@ class DiscordListener:
             'Ridealong Browser Daemon': 'ridealong',
             'Discord CLI Listener': 'discord_listener.py',
         } if is_mac else {
-            'Portal ATS Hunter (Turbo)': 'run_portal_worker.py',
+            'Portal Hunter (Instahyre + Naukri + ATS 24/7)': 'run_portal_worker.py',
             'Cold Email Worker (Dual-Inbox)': 'run_email_worker.py',
             'Instant 6s Bounce Monitor': 'run_bounce_monitor.py',
             'Live Sheet & Dashboard Server': 'run_dashboard_server.py',
@@ -183,7 +183,7 @@ class DiscordListener:
                 pw_ok = len(vm_chk) >= 1 and vm_chk[0].strip() == "active"
                 ew_ok = len(vm_chk) >= 2 and vm_chk[1].strip() == "active"
                 lines.append("\n**24/7 Oracle Cloud VM (`130.210.108.55`):**")
-                lines.append(f"• Portal ATS Hunter: {'🟢 RUNNING' if pw_ok else '🔴 STOPPED'}")
+                lines.append(f"• Portal Hunter (`Instahyre + Naukri + Direct ATS`): {'🟢 RUNNING' if pw_ok else '🔴 STOPPED'}")
                 lines.append(f"• Cold Email Worker: {'🟢 RUNNING' if ew_ok else '🔴 STOPPED'}")
             except Exception:
                 pass

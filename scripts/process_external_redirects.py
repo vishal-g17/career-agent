@@ -46,10 +46,12 @@ def process_redirects(max_jobs: int = 20):
                 AND url NOT LIKE '%naukri.com%'
                 AND url NOT LIKE '%linkedin.com%'
                 AND url NOT LIKE '%indeed.com%'
+                AND url NOT LIKE '%instahyre.com%'
                 AND COALESCE(match_score, 80) >= 70
             )
         )
         AND url NOT LIKE '%indeed.com%'
+        AND url NOT LIKE '%instahyre.com%'
         ORDER BY
             CASE
                 WHEN url LIKE '%greenhouse.io%' THEN 0

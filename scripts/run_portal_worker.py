@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.process_external_redirects import process_redirects
 from scripts.run_naukri_batch import run_naukri_batch
 from src.agents.job_hunter import run_job_hunt
+from src.services.instahyre_service import run_instahyre_auto_apply
 
 DB_PATH = os.environ.get("DATABASE_PATH") or os.path.expanduser("~/.linkedin_agent.db")
 if not os.path.exists(DB_PATH):
@@ -36,9 +37,10 @@ def get_pending_portal_counts():
         SELECT count(*) FROM jobs
         WHERE (
             status = 'external_redirect'
-            OR (status = 'new' AND url NOT LIKE '%naukri.com%' AND url NOT LIKE '%linkedin.com%' AND COALESCE(match_score, 80) >= 70)
+            OR (status = 'new' AND url NOT LIKE '%naukri.com%' AND url NOT LIKE '%linkedin.com%' AND url NOT LIKE '%instahyre.com%' AND COALESCE(match_score, 80) >= 70)
         )
         AND url NOT LIKE '%indeed.com%'
+        AND url NOT LIKE '%instahyre.com%'
         """
     )
     redirects_pending = cur.fetchone()[0]
@@ -50,8 +52,8 @@ def get_pending_portal_counts():
 
 def run_portal_worker():
     print("\n" + "=" * 80)
-    print("⚡ TURBO 24/7 JOB PORTAL WORKER (Greenhouse + Lever + Ashby + Naukri)")
-    print("Shared-Chromium batching | Fast 10-18s pacing | Zero Indeed login-wall stalls")
+    print("⚡ TURBO 24/7 JOB PORTAL WORKER (Instahyre + Greenhouse + Lever + Ashby + Naukri)")
+    print("Zero-RAM Instahyre REST Auto-Apply | Shared-Chromium ATS Batching | Fast Pacing")
     print("=" * 80 + "\n")
 
     iteration = 0
@@ -63,6 +65,14 @@ def run_portal_worker():
             f"\n[PortalWorker:Sweep #{iteration} | {now_str}] "
             f"Pending Naukri: {naukri_p} | Pending Direct ATS: {redir_p} | Total Applied: {applied_tot}"
         )
+
+        # 0. Run 24/7 Instahyre Auto-Discovery + Verified Auto-Apply (0 MB browser RAM!)
+        try:
+            ih_res = run_instahyre_auto_apply(max_apps=8)
+            if ih_res.get("applied", 0) > 0:
+                print(f"[PortalWorker] Instahyre confirmed {ih_res['applied']} new application(s) this sweep!")
+        except Exception as ihe:
+            print(f"[PortalWorker] Instahyre sweep note: {ihe}")
 
         # 1. Discover fresh openings on startup, when queue is low, or every 4 sweeps
         if iteration == 1 or iteration % 4 == 0 or (naukri_p == 0 and redir_p < 5):
