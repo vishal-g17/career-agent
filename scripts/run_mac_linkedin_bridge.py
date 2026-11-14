@@ -101,10 +101,12 @@ def main():
                 with urllib.request.urlopen(post_req, timeout=8) as _:
                     pass
 
-                # If synchronous waiter on Cloud VM already timed out (>42s), post late receipt directly to Discord
-                if elapsed >= 41.0:
+                # If synchronous waiter on Cloud VM already timed out, post late receipt directly to Discord
+                wait_cap = float(payload.get("timeout_s") or (168.0 if ttype == "agy_turn" else 41.0))
+                if elapsed >= wait_cap:
                     try:
-                        discord.send_message(ch_id, result_msg)
+                        for i in range(0, len(result_msg), 1900):
+                            discord.send_message(ch_id, result_msg[i:i + 1900])
                     except Exception:
                         pass
                 print(f"[MacPriorityBridge] ✅ Finished task #{tid} in {elapsed:.1f}s: {result_msg[:120]}")

@@ -152,6 +152,10 @@ class DiscordListener:
             lines.append(f"• {label}: {status_icon}")
 
         try:
+            if not is_mac:
+                hb = Path("/tmp/mac_bridge_heartbeat")
+                mac_online = hb.exists() and (time.time() - float(hb.read_text(encoding="utf-8").strip())) < 20.0
+                lines.append(f"• Mac Persistent Chrome Bridge (`Ridealong` + `agy`): {'🟢 ONLINE' if mac_online else '💤 ASLEEP (Cloud 24/7 Mode)'}")
             from src.services.linkedin_control import read_local_control
             ctl = read_local_control()
             li_en = ctl.get("linkedin_enabled", True)
@@ -311,7 +315,7 @@ class DiscordListener:
             }]
         }]
 
-        models_to_try = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        models_to_try = ["gemini-3-flash-preview", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
         active_model_idx = 0
 
         try:
@@ -348,7 +352,15 @@ class DiscordListener:
                 fn_calls = [p["functionCall"] for p in parts if "functionCall" in p]
                 if not fn_calls or is_final_summary:
                     text_parts = [p.get("text", "") for p in parts if "text" in p]
-                    final_reply = "\n".join(text_parts).strip() or "✅ Done."
+                    final_reply = "\n".join(text_parts).strip()
+                    if not final_reply and not is_final_summary:
+                        contents.append(cand_content)
+                        contents.append({
+                            "role": "user",
+                            "parts": [{"text": "Provide a clear, specific answer to the user's message based on the real system/tool results (never reply with empty text)."}]
+                        })
+                        continue
+                    final_reply = final_reply or "✅ Command executed."
                     self.turn_history.append({"role": "user", "parts": [{"text": prompt[:1000]}]})
                     self.turn_history.append({"role": "model", "parts": [{"text": final_reply[:1200]}]})
                     if len(self.turn_history) > 16:
@@ -375,10 +387,38 @@ class DiscordListener:
 
     def run_antigravity_cli_turn(self, prompt: str, target_channel: str, msg_id: str) -> str:
         """
-        Executes the prompt through the Antigravity (AGY) CLI engine if installed,
-        or runs the 24/7 Cloud VM tool-calling CLI agent when running on Linux VM.
+        Executes the prompt through the Antigravity (AGY) CLI engine:
+        - On Mac: invokes local `agy` CLI directly.
+        - On Cloud VM when Mac Bridge is awake: dispatches synchronously to Mac's full `agy` CLI!
+        - On Cloud VM when Mac is asleep: runs `gemini-3-flash-preview` Cloud Tool-Agent.
         """
         if not shutil.which(AGY_BIN) and not os.path.exists(AGY_BIN):
+            try:
+                from scripts.priority_exec import _is_mac_awake, dispatch_and_wait_mac
+                if _is_mac_awake():
+                    print(f"[DiscordCLI] Mac Bridge is awake -> Routing #prompt to full Mac AGY CLI: {prompt}")
+                    stop_t = threading.Event()
+                    def _type_bridge():
+                        while not stop_t.is_set():
+                            try:
+                                self.client.trigger_typing(target_channel)
+                            except Exception:
+                                pass
+                            time.sleep(4)
+                    threading.Thread(target=_type_bridge, daemon=True).start()
+                    try:
+                        out = dispatch_and_wait_mac(
+                            "agy_turn",
+                            {"prompt": prompt, "channel_id": target_channel, "msg_id": msg_id, "timeout_s": 168.0},
+                            channel_id=target_channel,
+                            timeout_s=170.0,
+                        )
+                        if out and not out.startswith("⏳"):
+                            return out
+                    finally:
+                        stop_t.set()
+            except Exception as be:
+                print(f"[DiscordCLI] Mac AGY bridge notice, falling back to Cloud Gemini 3 Flash: {be}")
             print(f"[DiscordCLI] Running 24/7 Cloud CLI Tool-Agent for prompt: {prompt}")
             return self.ask_gemini_agent(prompt, target_channel=target_channel)
 
@@ -467,12 +507,14 @@ class DiscordListener:
         self.client.trigger_typing(target_channel)
         self.client.add_reaction(target_channel, msg_id, "⚙️")
 
-        # 0. Instant Fast Path: Master Leads Sheet / Excel / CSV / Dashboard Link Request
-        sheet_triggers = [
-            "sheet", "excel", "xlsx", "csv", "leads link", "mail list",
-            "master list", "download leads", "data link", "dashboard link", "dashboard"
-        ]
-        if any(trig in lower for trig in sheet_triggers) and len(text.split()) <= 14:
+        # 0. Instant Fast Path: ONLY pure link requests (never hijack questions about dashboard/sheet!)
+        clean_q = lower.strip("?!. ")
+        pure_sheet_queries = {
+            "sheet", "sheet link", "leads sheet", "leads link", "mail list",
+            "master list", "excel", "xlsx", "csv", "download leads",
+            "dashboard", "dashboard link", "links", "cloud links",
+        }
+        if clean_q in pure_sheet_queries:
             print("[DiscordCLI] Serving instant Cloud VM Master Sheet & Download links")
             self.send_chunked(target_channel, self.get_sheet_links_message())
             self.client.add_reaction(target_channel, msg_id, "✅")
@@ -579,14 +621,13 @@ class DiscordListener:
                 self.send_chunked(target_channel, f"❌ LinkedIn 1-Task Runner Error: `{le}`")
             return
 
-        # 2. Fast path: Real-time System Status Check (Instant response without consuming CLI quota)
-        status_triggers = [
-            "status", "wht systems", "what systems", "systems running", "system status",
-            "running systems", "which systems", "what is running", "current status",
-            "working systems", "systems are working", "systems are currently working"
-        ]
-        if any(trig in lower for trig in status_triggers) and len(text.split()) < 10:
-            print(f"[DiscordCLI] Serving fast-path local status check")
+        # 2. Fast path: ONLY pure full-system status pings (specific questions like 'status of cold mailer?' go to AGY/Gemini!)
+        pure_status_queries = {
+            "status", "system status", "systems status", "running systems",
+            "currently running systems", "what systems are running", "which systems are running",
+        }
+        if clean_q in pure_status_queries:
+            print("[DiscordCLI] Serving fast-path local status check")
             status_text = self.get_system_status_text()
             self.send_chunked(target_channel, status_text)
             self.client.add_reaction(target_channel, msg_id, "✅")

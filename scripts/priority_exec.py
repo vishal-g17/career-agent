@@ -212,6 +212,14 @@ def execute_mac_task_locally(task_type: str, payload: Dict[str, Any]) -> str:
                 f"• **Portal:** `{ats_t}` ({final_u})\n"
                 f"• **Reason:** `{err or 'unconfirmed_after_submit'}` | **Fields Filled:** `{len(res.get('fields_filled', []))}`"
             )
+    elif task_type == "agy_turn":
+        from src.agents.discord_listener import DiscordListener
+        dl = DiscordListener(channel_id=payload.get("channel_id") or "1570342549435187290")
+        return dl.run_antigravity_cli_turn(
+            payload.get("prompt", ""),
+            payload.get("channel_id") or "1570342549435187290",
+            payload.get("msg_id") or "",
+        )
     elif task_type == "mac_sh":
         import subprocess
         proc = subprocess.run(
