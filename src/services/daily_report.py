@@ -226,7 +226,7 @@ def format_daily_report_markdown(base_cloud_url: str = "", header_prefix: str = 
         f"• **Instahyre (24/7 Cloud REST):** `{tp['Instahyre']}` today (`{ap['Instahyre']}` total)",
         f"• **Direct Company ATS (Greenhouse/Lever/Ashby):** `{tp['Direct ATS (Greenhouse/Lever/Ashby)']}` today (`{ap['Direct ATS (Greenhouse/Lever/Ashby)']}` total)",
         f"• **LinkedIn Easy Apply:** `{tp['LinkedIn Jobs']}` today (`{ap['LinkedIn Jobs']}` total)",
-        f"• **Naukri:** `{tp['Naukri']}` today (`{ap['Naukri']}` total — Cloud IP gated by Akamai)",
+        f"• **Naukri (Local Mac 10 AM–11 PM Loop):** `{tp['Naukri']}` today (`{ap['Naukri']}` total)",
         f"• **Indeed:** `{tp['Indeed']}` today (`{ap['Indeed']}` total — Cloudflare CAPTCHA gated)",
     ]
     if m["today_companies"]:

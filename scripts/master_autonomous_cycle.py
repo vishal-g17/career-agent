@@ -843,7 +843,25 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     except Exception as jae:
         print(f"[InterBatch:Jobs] Note: {jae}")
 
-    # 4. Acceptance check + Pre-Batch Random Cool-Down
+    # 4. Stage D -> Local Naukri Discovery + Auto-Apply (1 task at a time via Ridealong, synced to Cloud DB)
+    if sync_control_with_cloud().get("linkedin_enabled", True) and is_in_active_window():
+        print("[InterBatch:Naukri] Stage D -> Discovering & auto-applying to fresh Naukri openings (max 10 verified apps)...")
+        sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage D -> Naukri Auto-Apply", force=True)
+        send_discord_cycle_note(
+            "💼 **Stage D — Naukri Fresh Discovery & Auto-Apply**\n"
+            "• Scraping `<24h` APM / Product / Business Analyst listings on Naukri and submitting verified 1-click & chatbot applications."
+        )
+        try:
+            nk_py = (
+                f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
+                "from scripts.run_naukri_batch import run_naukri_batch; "
+                "run_naukri_batch(limit=10)"
+            )
+            subprocess.run([sys.executable, "-u", "-c", nk_py], timeout=420)
+        except Exception as nke:
+            print(f"[InterBatch:Naukri] Note: {nke}")
+
+    # 5. Acceptance check + Pre-Batch Random Cool-Down
     try:
         new_accepts = check_and_message_accepted_connections(page, conn)
         if new_accepts > 0:
@@ -935,6 +953,7 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
         context = None
         page = None
         paused_logged = False
+        last_naukri_standalone_ts = 0.0
 
         while True:
             try:
@@ -944,8 +963,20 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 ctl_state = sync_control_with_cloud()
                 if not ctl_state.get("linkedin_enabled", True):
                     if not paused_logged:
-                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Waiting for 'start linkedin' on #prompt or CLI...")
+                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Naukri continues independently during 10 AM - 11 PM IST!")
                         paused_logged = True
+                    # Keep Naukri running every ~30m during 10 AM - 11 PM IST even while LinkedIn is paused/logged out (unless manual emergency_stop)
+                    if is_in_active_window() and ctl_state.get("reason") != "emergency_stop" and (time.time() - last_naukri_standalone_ts) >= 1800.0:
+                        last_naukri_standalone_ts = time.time()
+                        try:
+                            nk_py = (
+                                f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
+                                "from scripts.run_naukri_batch import run_naukri_batch; "
+                                "run_naukri_batch(limit=10)"
+                            )
+                            subprocess.run([sys.executable, "-u", "-c", nk_py], timeout=420)
+                        except Exception as snke:
+                            print(f"[Cycle:NaukriStandalone] Note: {snke}")
                     time.sleep(10)
                     continue
                 if paused_logged:

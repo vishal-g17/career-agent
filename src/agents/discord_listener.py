@@ -158,7 +158,7 @@ class DiscordListener:
             li_stage = ctl.get("stage", "idle")
             li_hb = ctl.get("last_mac_heartbeat", "n/a")
             lines.append(
-                f"\n**LinkedIn Loop (Local Mac Only — `10 AM – 11 PM IST`, Zero Cloud Dependency):**\n"
+                f"\n**Local Mac Loop (`LinkedIn + Naukri` Only — `10 AM – 11 PM IST`, Zero Cloud Dependency):**\n"
                 f"• State: {'🟢 ENABLED' if li_en else '🛑 STOPPED'} (`{li_stage}` | last heartbeat: `{li_hb}`)"
             )
         except Exception:

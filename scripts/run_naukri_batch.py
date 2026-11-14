@@ -18,9 +18,108 @@ if not os.path.exists(DB_PATH):
 
 DISCORD_CHANNEL = "1569246471251959838"
 
+def _discover_fresh_naukri_into_db(conn) -> int:
+    """Scrapes fresh (<24h) Naukri jobs across Vishal's target roles and saves high-fit matches to DB."""
+    from src.agents.job_hunter import scrape_fresh_naukri_jobs, score_job_heuristic
+    from src.services.exclusion_filter import FORBIDDEN_COMPANIES
+    import json
+
+    keywords = [
+        "associate product manager",
+        "product analyst",
+        "business analyst",
+        "data analyst",
+        "category manager",
+        "operations analyst",
+        "founders office",
+    ]
+    scraped = scrape_fresh_naukri_jobs(keywords=keywords)
+    saved = 0
+    cur = conn.cursor()
+    for j in scraped:
+        comp_l = (j.get("company") or "").lower()
+        title_l = (j.get("title") or "").lower()
+        if any(fc in f"{comp_l} {title_l}" for fc in FORBIDDEN_COMPANIES):
+            continue
+        score, reasons = score_job_heuristic(j["title"], j["company"])
+        if score < 70:
+            continue
+        exists = cur.execute(
+            "SELECT 1 FROM jobs WHERE id = ? OR url = ?",
+            (j["dedup_id"], j["url"]),
+        ).fetchone()
+        if exists:
+            continue
+        sc_json = json.dumps({"score": score, "reasons": reasons, "platform": "Naukri"})
+        cur.execute(
+            """
+            INSERT INTO jobs (id, job_id, title, company, location, posted_at, url, match_score, scorecard, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+            """,
+            (
+                j["dedup_id"],
+                j["job_id"],
+                j["title"],
+                j["company"],
+                j["location"],
+                j["posted_time"],
+                j["url"],
+                score,
+                sc_json,
+            ),
+        )
+        saved += 1
+    conn.commit()
+    print(f"[NaukriBatch] Fresh Naukri discovery scanned {len(scraped)} listings -> saved {saved} high-fit new roles.")
+    return saved
+
+
+def _sync_naukri_updates_to_cloud(conn) -> None:
+    """Syncs confirmed Naukri 'applied' jobs and extracted external ATS redirects from Local Mac DB to Cloud VM DB."""
+    ssh_key = os.path.expanduser("~/Downloads/agent-vm-key.key")
+    if sys.platform != "darwin" or not os.path.exists(ssh_key):
+        return
+    try:
+        import base64, json, subprocess
+        rows = conn.execute(
+            """
+            SELECT id, job_id, title, company, COALESCE(location, 'India'), posted_at, url,
+                   COALESCE(match_score, 85), COALESCE(scorecard, '{}'), status, created_at
+            FROM jobs
+            WHERE (status = 'applied' AND (url LIKE '%naukri%' OR COALESCE(scorecard, '') LIKE '%naukri%'))
+               OR (status = 'external_redirect' AND url NOT LIKE '%naukri.com%')
+            ORDER BY created_at DESC
+            LIMIT 80
+            """
+        ).fetchall()
+        if not rows:
+            return
+        b64 = base64.b64encode(json.dumps(rows).encode("utf-8")).decode("ascii")
+        remote_py = (
+            f"import base64,json,sqlite3; rows=json.loads(base64.b64decode('{b64}').decode()); "
+            "c=sqlite3.connect('/home/opc/.linkedin_agent.db',timeout=20.0); "
+            "c.executemany('''INSERT INTO jobs (id,job_id,title,company,location,posted_at,url,match_score,scorecard,status,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, url=excluded.url, scorecard=excluded.scorecard''', rows); "
+            "c.commit(); c.close()"
+        )
+        subprocess.run(
+            ["ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "opc@130.210.108.55", "/home/opc/career-agent/venv/bin/python3 -"],
+            input=remote_py, text=True, capture_output=True, timeout=15,
+        )
+    except Exception as se:
+        print(f"[NaukriBatch] Cloud DB sync notice: {se}")
+
+
 def run_naukri_batch(limit: int = 50):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    pending_now = cur.execute('SELECT count(*) FROM jobs WHERE url LIKE "%naukri.com%" AND status = "new"').fetchone()[0]
+    if sys.platform == "darwin" and pending_now < 8:
+        try:
+            _discover_fresh_naukri_into_db(conn)
+        except Exception as de:
+            print(f"[NaukriBatch] Discovery notice: {de}")
 
     cur.execute('''
         SELECT id, title, company, url 
@@ -122,7 +221,10 @@ def run_naukri_batch(limit: int = 50):
         # Humanized delay between applications
         time.sleep(5)
 
+    _sync_naukri_updates_to_cloud(conn)
+    conn.close()
     print(f"\n[NaukriBatch] Completed! Applied: {applied_count}, External Redirects: {redirect_count}, Failed/Skipped: {failed_count}")
+    return applied_count
 
 if __name__ == "__main__":
     limit = 50

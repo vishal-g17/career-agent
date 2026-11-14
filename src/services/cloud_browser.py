@@ -124,6 +124,29 @@ def cloud_browser_page(
 
     try:
         with sync_playwright() as p:
+            # On Local Mac ONLY, attach to active Ridealong session for Naukri (never closes persistent Ridealong browser)
+            if sys.platform == "darwin" and cookie_domain == "naukri":
+                import socket
+                has_ridealong = False
+                try:
+                    with socket.create_connection(("127.0.0.1", 9230), timeout=0.5):
+                        has_ridealong = True
+                except OSError:
+                    has_ridealong = False
+
+                if has_ridealong:
+                    cdp_browser = p.chromium.connect_over_cdp("http://127.0.0.1:9230/default/naukri-bot", timeout=8000)
+                    cdp_ctx = cdp_browser.contexts[0] if cdp_browser.contexts else cdp_browser.new_context()
+                    cdp_page = cdp_ctx.new_page()
+                    try:
+                        yield cdp_page, cdp_ctx
+                    finally:
+                        try:
+                            cdp_page.close()
+                        except Exception:
+                            pass
+                    return
+
             launch_args = get_cloud_chromium_args()
             browser = p.chromium.launch(headless=True, args=launch_args)
             context = browser.new_context(
