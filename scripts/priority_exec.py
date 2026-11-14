@@ -39,7 +39,10 @@ def run_priority_email(args) -> str:
 
     recip = args.to.strip()
     check_blob = f"{recip} {args.company or ''} {args.subject or ''} {args.body or ''}".lower()
-    if any(fc in check_blob for fc in FORBIDDEN_COMPANIES):
+    if any(
+        (re.search(rf"\b{re.escape(fc)}\b", check_blob) if len(fc) <= 4 else (fc in check_blob))
+        for fc in FORBIDDEN_COMPANIES
+    ):
         return f"🛑 Blocked: `{recip}` or message content matches restricted company exclusion rule."
 
     def _record_outreach_lead(used_sender: str) -> None:

@@ -82,9 +82,12 @@ def is_excluded(name: str = "", headline: str = "", card_text: str = "") -> str:
     """
     full_text = f"{name} {headline} {card_text}".lower()
 
-    # E1: Confidentiality / Former Employers
+    # E1: Confidentiality / Former Employers (word-boundary for short <=4 char tokens to avoid matching 'economic'/'anomalies')
     for fc in FORBIDDEN_COMPANIES:
-        if fc in full_text:
+        if len(fc) <= 4:
+            if re.search(rf"\b{re.escape(fc)}\b", full_text, re.IGNORECASE):
+                return f"E1_CONFIDENTIAL_COMPANY_{fc.upper()}"
+        elif fc in full_text:
             return f"E1_CONFIDENTIAL_COMPANY_{fc.upper()}"
 
     # E2: Students / Juniors graduating AFTER 2026 (Grads till 2026 are allowed)
