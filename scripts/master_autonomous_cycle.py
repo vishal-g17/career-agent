@@ -843,14 +843,7 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     except Exception as jae:
         print(f"[InterBatch:Jobs] Note: {jae}")
 
-    # 4. Acceptance check + Instahyre Cookie Auto-Sync to Cloud VM + Pre-Batch Random Cool-Down
-    try:
-        from src.services.instahyre_service import sync_instahyre_cookies_from_ridealong
-        if sync_instahyre_cookies_from_ridealong(push_to_cloud=True):
-            print("[InterBatch:Instahyre] 🔄 Refreshed & synced Instahyre cookies to 24/7 Cloud VM.")
-    except Exception as ice:
-        print(f"[InterBatch:Instahyre] Cookie sync note: {ice}")
-
+    # 4. Acceptance check + Pre-Batch Random Cool-Down
     try:
         new_accepts = check_and_message_accepted_connections(page, conn)
         if new_accepts > 0:

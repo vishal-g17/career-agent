@@ -703,6 +703,29 @@ class DiscordListener:
             self.client.add_reaction(target_channel, msg_id, "✅")
             return
 
+        # 2c. Fast path: Follow-Up Emails Start / Stop Control (24/7 Cloud VM)
+        if any(p in lower for p in ["stop followup", "pause followup", "disable followup", "dont start followup", "don't start followup"]):
+            from src.services.outreach_campaign import set_followups_enabled
+            st = set_followups_enabled(False, updated_by="discord_prompt")
+            self.send_chunked(
+                target_channel,
+                f"⏸️ **Cold Email Follow-Ups PAUSED** (`{st['updated_at']}`).\n"
+                "• Zero follow-up emails will be sent until you send `start followups` here in `#prompt` or on CLI."
+            )
+            self.client.add_reaction(target_channel, msg_id, "⏸️")
+            return
+
+        if any(p in lower for p in ["start followup", "resume followup", "enable followup"]):
+            from src.services.outreach_campaign import set_followups_enabled
+            st = set_followups_enabled(True, updated_by="discord_prompt")
+            self.send_chunked(
+                target_channel,
+                f"🟢 **Cold Email Follow-Ups ENABLED** (`{st['updated_at']}`).\n"
+                "• 24/7 Cloud Email Worker will begin dispatching same-thread follow-ups to non-replied leads on its next cycle!"
+            )
+            self.client.add_reaction(target_channel, msg_id, "✅")
+            return
+
         # 3. Emergency Safety Pause
         if any(w in lower for w in ["emergency stop", "kill all workers", "pause everything"]):
             try:

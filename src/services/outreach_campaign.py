@@ -1,8 +1,35 @@
+import json
 import time
 import os
 import random
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+FOLLOWUP_CONTROL_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "followup_control.json"
+
+
+def is_followups_enabled() -> bool:
+    """Returns True ONLY when Vishal has explicitly enabled follow-up emails (default: False / paused)."""
+    if os.environ.get("FOLLOWUPS_ENABLED", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    if FOLLOWUP_CONTROL_PATH.exists():
+        try:
+            return bool(json.loads(FOLLOWUP_CONTROL_PATH.read_text(encoding="utf-8")).get("enabled", False))
+        except Exception:
+            return False
+    return False
+
+
+def set_followups_enabled(enabled: bool, updated_by: str = "cli") -> Dict[str, Any]:
+    FOLLOWUP_CONTROL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "enabled": bool(enabled),
+        "updated_by": updated_by,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    FOLLOWUP_CONTROL_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    return state
 from .cold_mailer import compose_cold_email, send_cold_email_smtp, get_sender_credentials
 from .email_verifier import verify_email
 from .exclusion_filter import is_excluded, is_bounced_or_discarded, record_bounced_email
