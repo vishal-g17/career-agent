@@ -383,15 +383,26 @@ class DiscordListener:
                 if not is_final_summary:
                     payload["tools"] = tools_spec
                 data = json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-                try:
-                    resp = urllib.request.urlopen(req, timeout=50)
-                    res_json = json.loads(resp.read().decode())
-                except Exception as api_err:
+                res_json = None
+                last_api_err = None
+                for _retry in range(3):
+                    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                    try:
+                        resp = urllib.request.urlopen(req, timeout=50)
+                        res_json = json.loads(resp.read().decode())
+                        break
+                    except Exception as api_err:
+                        last_api_err = api_err
+                        time.sleep(1.5)
+                if res_json is None:
                     if active_model_idx + 1 < len(models_to_try):
                         active_model_idx += 1
+                        # Strip model-specific thoughtSignature if switching models mid-turn
+                        for msg_item in contents:
+                            for pt in msg_item.get("parts", []):
+                                pt.pop("thoughtSignature", None)
                         continue
-                    return f"❌ AI Tool-Agent Error: `{api_err}`"
+                    return f"❌ AI Tool-Agent Error: `{last_api_err}`"
 
                 cand_content = res_json["candidates"][0]["content"]
                 parts = cand_content.get("parts", [])
@@ -433,38 +444,9 @@ class DiscordListener:
 
     def run_antigravity_cli_turn(self, prompt: str, target_channel: str, msg_id: str) -> str:
         """
-        Executes the prompt through the Antigravity (AGY) CLI engine:
-        - On Mac: invokes local `agy` CLI directly.
-        - On Cloud VM when Mac Bridge is awake: dispatches synchronously to Mac's full `agy` CLI!
-        - On Cloud VM when Mac is asleep: runs `gemini-3-flash-preview` Cloud Tool-Agent.
+        Executes the prompt immediately on the 24/7 Cloud Gemini Tool-Agent (no 180s Mac AGY CLI bridge stalls!).
         """
         if not shutil.which(AGY_BIN) and not os.path.exists(AGY_BIN):
-            try:
-                from scripts.priority_exec import _is_mac_awake, dispatch_and_wait_mac
-                if _is_mac_awake():
-                    print(f"[DiscordCLI] Mac Bridge is awake -> Routing #prompt to full Mac AGY CLI: {prompt}")
-                    stop_t = threading.Event()
-                    def _type_bridge():
-                        while not stop_t.is_set():
-                            try:
-                                self.client.trigger_typing(target_channel)
-                            except Exception:
-                                pass
-                            time.sleep(4)
-                    threading.Thread(target=_type_bridge, daemon=True).start()
-                    try:
-                        out = dispatch_and_wait_mac(
-                            "agy_turn",
-                            {"prompt": prompt, "channel_id": target_channel, "msg_id": msg_id, "timeout_s": 168.0},
-                            channel_id=target_channel,
-                            timeout_s=170.0,
-                        )
-                        if out and not out.startswith("⏳"):
-                            return out
-                    finally:
-                        stop_t.set()
-            except Exception as be:
-                print(f"[DiscordCLI] Mac AGY bridge notice, falling back to Cloud Gemini 3 Flash: {be}")
             print(f"[DiscordCLI] Running 24/7 Cloud CLI Tool-Agent for prompt: {prompt}")
             return self.ask_gemini_agent(prompt, target_channel=target_channel)
 
@@ -618,6 +600,52 @@ class DiscordListener:
             except Exception as ae:
                 self.send_chunked(target_channel, f"❌ Priority Apply Error on `{target_apply_url}`: `{ae}`")
                 return
+
+        # 0c. Deterministic Priority #0 Fast-Path for Immediate Cold Emails (e.g. "avila@onfinance.in and sanjana@onfinance.in send mails")
+        emails_in_msg = list(dict.fromkeys(
+            e.lower().strip(".,;<>()\"'")
+            for e in re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)
+            if not any(own in e.lower() for own in ("vishal90301@", "vishal.gupta.ug22@"))
+        ))
+        is_direct_email_cmd = (
+            bool(emails_in_msg)
+            and any(k in lower for k in ["send mail", "send mails", "send email", "send emails", "mail them", "email them", "send cold", "pitch"])
+            and not any(k in lower for k in ["subject:", "body:", "say ", "saying ", "write:"])
+            and len(text.split()) <= 25
+        )
+        if is_direct_email_cmd:
+            print(f"[DiscordCLI] Deterministic Priority #0 Email Fast-Path -> {emails_in_msg}")
+            py_bin = sys.executable or "python3"
+            exec_script = str(PROJECT_ROOT / "scripts" / "priority_exec.py")
+            receipts = []
+            for em_addr in emails_in_msg[:10]:
+                local_part, dom_part = em_addr.split("@", 1)
+                first_guess = re.split(r"[._0-9-]+", local_part)[0].capitalize() or "Hiring Team"
+                comp_guess = dom_part.split(".")[0].capitalize()
+                try:
+                    proc = subprocess.run(
+                        [
+                            py_bin, exec_script, "email",
+                            "--to", em_addr,
+                            "--name", first_guess,
+                            "--company", comp_guess,
+                            "--role", "Business / Product Analyst / Management",
+                        ],
+                        cwd=WORKSPACE_DIR,
+                        capture_output=True,
+                        text=True,
+                        timeout=45,
+                    )
+                    out_e = "\n".join(
+                        ln for ln in ((proc.stdout or "").strip() or (proc.stderr or "").strip()).splitlines()
+                        if not ln.startswith("[ColdMailer]")
+                    ).strip()
+                    receipts.append(out_e or f"✅ Dispatched to `{em_addr}`")
+                except Exception as ee:
+                    receipts.append(f"❌ Error sending to `{em_addr}`: `{ee}`")
+            self.send_chunked(target_channel, "\n\n".join(receipts)[:1900])
+            self.client.add_reaction(target_channel, msg_id, "✅")
+            return
 
         # 1. Fast path: Direct Raw Terminal / Shell Execution (!sh <cmd> or !bash <cmd>)
         if text.startswith("!sh ") or text.startswith("!bash ") or text.startswith("!run "):

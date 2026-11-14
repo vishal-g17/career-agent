@@ -272,9 +272,9 @@ def run_priority_email(args) -> str:
     else:
         draft = compose_cold_email(
             recipient_email=recip,
-            role_title=args.role or "APM / Product & Business Analyst",
+            role_title=args.role or "Business / Product Analyst / Management",
             company_name=args.company or "",
-            preferred_sender=args.sender or None,
+            sender_email=args.sender or None,
         )
         subj = args.subject or draft["subject"]
         ok = send_cold_email_smtp(recip, subj, draft["body"], sender_email=draft["sender"])
