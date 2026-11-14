@@ -17,7 +17,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.engine.discord_client import DiscordClient
 from src import config
 
-AGY_BIN = os.environ.get("AGY_BIN") or shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy")
 WORKSPACE_DIR = os.environ.get("WORKSPACE_DIR") or str(PROJECT_ROOT)
 
 class DiscordListener:
@@ -133,60 +132,28 @@ class DiscordListener:
         lines = [f"📊 **Live Systems Status Report** ({now_str})\n"]
 
         ps_res = subprocess.run(['ps', 'aux'], capture_output=True, text=True).stdout
-        is_mac = sys.platform == "darwin"
-        lines.append(f"**Active Host (`{'Mac + Ridealong' if is_mac else 'Oracle Cloud VM'}`):**")
-        local_procs = {
-            'LinkedIn Master Cycle (1-Task Loop)': 'master_autonomous_cycle.py',
-            'Ridealong Browser Daemon': 'ridealong',
-            'Discord CLI Listener': 'discord_listener.py',
-        } if is_mac else {
-            'Portal Hunter (Instahyre + Naukri + ATS 24/7)': 'run_portal_worker.py',
-            'Cold Email Worker (Dual-Inbox)': 'run_email_worker.py',
+        lines.append("**24/7 Standalone Oracle Cloud VM (`130.210.108.55` — Zero Local Device Dependency):**")
+        cloud_procs = {
+            'Portal Hunter (`Instahyre REST + Greenhouse/Lever/Ashby 24/7`)': 'run_portal_worker.py',
+            'Cold Email Worker (`Dual-Inbox + Reply Scanner`)': 'run_email_worker.py',
             'Instant 6s Bounce Monitor': 'run_bounce_monitor.py',
             'Live Sheet & Dashboard Server': 'run_dashboard_server.py',
-            'Discord Listener': 'discord_listener.py',
+            'Discord `#prompt` AI Listener': 'discord_listener.py',
         }
-        for label, pat in local_procs.items():
+        for label, pat in cloud_procs.items():
             running = any(pat in l for l in ps_res.splitlines())
             status_icon = "🟢 RUNNING" if running else "🔴 STOPPED"
             lines.append(f"• {label}: {status_icon}")
 
         try:
-            if not is_mac:
-                hb = Path("/tmp/mac_bridge_heartbeat")
-                mac_online = hb.exists() and (time.time() - float(hb.read_text(encoding="utf-8").strip())) < 20.0
-                lines.append(f"• Mac Persistent Chrome Bridge (`Ridealong` + `agy`): {'🟢 ONLINE' if mac_online else '💤 ASLEEP (Cloud 24/7 Mode)'}")
-            from src.services.linkedin_control import read_local_control
-            ctl = read_local_control()
-            li_en = ctl.get("linkedin_enabled", True)
-            li_stage = ctl.get("stage", "idle")
-            li_hb = ctl.get("last_mac_heartbeat", "n/a")
-            li_reason = ctl.get("reason", "active")
+            from src.services.outreach_campaign import is_followups_enabled
+            fu_en = is_followups_enabled()
             lines.append(
-                f"• LinkedIn Automation (Cloud-Synced Control): "
-                f"{'🟢 ENABLED' if li_en else '🛑 STOPPED'} (`{li_stage}` | reason: `{li_reason}` | last heartbeat: `{li_hb}`)"
+                f"• Cold Email Follow-Ups (`+3d / +7d`): "
+                f"{'🟢 ENABLED' if fu_en else '⏸️ PAUSED (waiting for your start trigger)'}"
             )
         except Exception:
             pass
-
-        if is_mac:
-            try:
-                vm_chk = subprocess.run(
-                    [
-                        "ssh", "-i", "/Users/admin/Downloads/agent-vm-key.key",
-                        "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=4",
-                        "opc@130.210.108.55",
-                        "systemctl is-active linkedin-portal-worker.service linkedin-email-worker.service"
-                    ],
-                    capture_output=True, text=True, timeout=6
-                ).stdout.strip().splitlines()
-                pw_ok = len(vm_chk) >= 1 and vm_chk[0].strip() == "active"
-                ew_ok = len(vm_chk) >= 2 and vm_chk[1].strip() == "active"
-                lines.append("\n**24/7 Oracle Cloud VM (`130.210.108.55`):**")
-                lines.append(f"• Portal Hunter (`Instahyre + Naukri + Direct ATS`): {'🟢 RUNNING' if pw_ok else '🔴 STOPPED'}")
-                lines.append(f"• Cold Email Worker: {'🟢 RUNNING' if ew_ok else '🔴 STOPPED'}")
-            except Exception:
-                pass
 
         try:
             db_path = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
@@ -251,7 +218,6 @@ class DiscordListener:
                     time.sleep(4)
             threading.Thread(target=_keep_typing, daemon=True).start()
 
-        is_mac = sys.platform == "darwin"
         py_exec = sys.executable or "python3"
         db_loc = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
         live_base = self.get_live_cloud_base_url().rstrip("/")
@@ -273,50 +239,38 @@ class DiscordListener:
             pass
 
         host_desc = (
-            f"Local Mac (`{WORKSPACE_DIR}`), Python `{py_exec}`, DB `{db_loc}`."
-            if is_mac else
-            f"24/7 Oracle Cloud VM (`130.210.108.55`, workspace `{WORKSPACE_DIR}`, Python `{py_exec}`, SQLite DB `{db_loc}`). "
-            "Systemd services running 24/7 here even when Vishal's Mac is completely OFF/asleep:\n"
-            "  • `linkedin-email-worker.service` (24/7 simultaneous Cold Email across `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com`)\n"
+            f"100% Standalone 24/7 Oracle Cloud VM (`130.210.108.55`, workspace `{WORKSPACE_DIR}`, Python `{py_exec}`, SQLite DB `{db_loc}`). "
+            "ZERO dependency on Vishal's local laptop/Mac — everything runs autonomously 24/7 in the Cloud:\n"
+            "  • `linkedin-email-worker.service` (24/7 simultaneous Cold Email across `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com` + pipelined IMAP reply scanner; follow-ups controlled via `data/followup_control.json`)\n"
             "  • `linkedin-bounce-monitor.service` (6s parallel IMAP bounce wiper & DB/sheet purger)\n"
-            "  • `linkedin-portal-worker.service` (24/7 Instahyre Zero-RAM REST Auto-Apply + Greenhouse/Lever/Ashby + Naukri)\n"
+            "  • `linkedin-portal-worker.service` (24/7 Instahyre Zero-RAM REST Auto-Apply + Greenhouse/Lever/Ashby/Workday/Google Forms)\n"
             "  • `linkedin-dashboard.service` + `linkedin-dashboard-tunnel.service` "
             f"(Live Master Sheet: `{live_base}/sheet`, Clean Excel Download: `{live_base}/download/MASTER_LEADS_SHEET.xlsx`, Clean CSV: `{live_base}/download/ACTIVE_DELIVERED_LEADS.csv`, Dashboard: `{live_base}/p/dashboard`)\n"
             "  • `linkedin-discord-listener.service` (this 24/7 Discord `#prompt` CLI daemon)\n"
             "SQLite DB Tables in `~/.linkedin_agent.db`:\n"
-            "  • `jobs(id, job_id, title, company, location, posted_at, url, match_score, scorecard, status, created_at)` — `status='applied'` ONLY for genuinely submitted & confirmed apps (includes Instahyre `id LIKE 'instahyre_%'`, Greenhouse, Lever, Ashby, Naukri, LinkedIn).\n"
+            "  • `jobs(id, job_id, title, company, location, posted_at, url, match_score, scorecard, status, created_at)` — `status='applied'` ONLY for genuinely submitted & confirmed apps.\n"
             "  • `outreach_leads(id, name, email, company, role_target, sender_email, status, first_sent_at, followup_1_at, followup_2_at, last_sent_at, followup_count, reply_snippet)` — `status IN ('pending', 'sent', 'replied', 'unresponsive')`.\n"
             "  • `bounced_blocklist(email, reason, detected_at)` — dead/bounced addresses permanently blocked & deleted from `outreach_leads`.\n"
-            "  • `linkedin_connections_outreach(id, name, headline, status, sent_at)` — LinkedIn 1st-degree DMs.\n"
-            "Note on Job Applications & Portals when Mac is Asleep:\n"
-            "  • `scripts/priority_exec.py apply --url <url>` runs 24/7 directly on this Cloud VM! It natively submits Instahyre (`instahyre.com`), Greenhouse, Lever, Ashby, Keka, Workday, Google Forms, AND unwraps `lnkd.in/p/...` posts + sends immediate cold emails to recruiters!\n"
-            "  • Batch Instahyre sweep on demand: `from src.services.instahyre_service import run_instahyre_auto_apply; run_instahyre_auto_apply(max_apps=10)`.\n"
-            "  • ONLY LinkedIn 1st-degree DMs and LinkedIn Easy Apply (`linkedin.com/jobs/view/...`) require Vishal's residential Mac Chrome (`Ridealong`) to be awake (because LinkedIn blocks cloud datacenter IPs).\n"
-            f"• To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} {WORKSPACE_DIR}/src/services/linkedin_control.py stop` or `start` or `status`.\n"
-            "• 🚨 ABSOLUTE HONESTY & INTEGRITY LAW:\n"
-            "  - NEVER run raw SQL (`UPDATE jobs SET status='applied'` or `INSERT INTO jobs`) to fake job applications! That is strictly blocked by the firewall.\n"
-            "  - NEVER say Instahyre, Greenhouse, Lever, Ashby, Keka, or `lnkd.in/p/...` links cannot be automated from the Cloud VM — ALWAYS run `priority_exec.py apply --url <url>` immediately and report its real output!\n"
-            "• 🚨 PRIORITY #0 IMMEDIATE EXECUTION LAW (APPLIES TO EVERY TASK — LINKEDIN, EMAIL, PORTALS, DATA, SHEET, CONFIG):\n"
-            "  Whenever Vishal asks you to do ANYTHING in `#prompt`, DO IT IMMEDIATELY ON PRIORITY #0 RIGHT NOW! NEVER queue his request behind background batches and NEVER reply 'Queued, will run later'!\n"
-            "  Use the unified synchronous Priority #0 Executor (which executes immediately and waits for real verified completion before returning):\n"
-            f"  1) **Send LinkedIn Message (Custom Text OR Job Pitch+CV) / Connect:**\n"
-            f"     - Custom message: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py linkedin-msg --query \"Shivani Gupta\" --name \"Shivani Gupta\" --custom-message \"Hello\" --channel \"{target_channel or self.channel_id}\"`\n"
-            f"     - Job outreach pitch + CV: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py linkedin-msg --query \"Rahul Razorpay PM\" --name \"Rahul\" --company \"Razorpay\" --role \"PM\" --channel \"{target_channel or self.channel_id}\"`\n"
-            f"  2) **Send Immediate Email (Custom OR Cold Pitch+CV — bypasses 2,200-lead queue!):**\n"
+            "  • `linkedin_connections_outreach(id, name, headline, status, sent_at)` — historical LinkedIn 1st-degree DMs.\n"
+            "Priority #0 Immediate Cloud Execution Commands (`scripts/priority_exec.py`):\n"
+            f"  1) **Send Immediate Email (Cold Pitch+CV OR Custom Email — bypasses 2,200-lead queue!):**\n"
             f"     - Cold pitch + CV right now: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py email --to \"hr@company.com\" --name \"HR\" --company \"Company\" --role \"APM\"`\n"
             f"     - Custom email right now: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py email --to \"x@y.com\" --subject \"...\" --body \"...\" --no-cv`\n"
-            f"  3) **Apply Immediately to Any Job / Form URL (Instahyre, LinkedIn, Greenhouse, Lever, Ashby, Google Form):**\n"
-            f"     `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py apply --url \"<job_url>\" --role \"Product Analyst\" --channel \"{target_channel or self.channel_id}\"`\n"
-            f"  4) **Run Any Urgent Command on Local Mac:**\n"
-            f"     `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py mac-sh --cmd \"<command>\" --channel \"{target_channel or self.channel_id}\"`\n"
-            f"  5) **Any Cloud DB / Sheet / Worker Edit or Question Answering:** Execute inline immediately via `execute_shell_command` on `{db_loc}` / `{WORKSPACE_DIR}` and verify!"
+            f"  2) **Apply Immediately to Any Job / Form / Post URL (Instahyre, Greenhouse, Lever, Ashby, Keka, Workday, Google Form, `lnkd.in/p/...`):**\n"
+            f"     `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py apply --url \"<job_url>\" --role \"Product Analyst\"`\n"
+            "  3) **Batch Instahyre Sweep on Demand:** `from src.services.instahyre_service import run_instahyre_auto_apply; run_instahyre_auto_apply(max_apps=10)`.\n"
+            "  4) **Enable / Pause Cold Email Follow-Ups:** `from src.services.outreach_campaign import set_followups_enabled; set_followups_enabled(True|False)`.\n"
+            "  5) **Any Cloud DB / Sheet / Worker Query or Edit:** Execute inline immediately via `execute_shell_command` on `{db_loc}` / `{WORKSPACE_DIR}` and verify!\n"
+            "• 🚨 ABSOLUTE HONESTY & ZERO-MAC-DEPENDENCY LAW:\n"
+            "  - NEVER depend on, wait on, or attempt to connect to Vishal's local Mac for anything.\n"
+            "  - NEVER run raw SQL (`UPDATE jobs SET status='applied'` or `INSERT INTO jobs`) to fake job applications!"
         )
         system_context = (
-            "You are Vishal Gupta's Priority #0 Autonomous CLI Agent running 24/7 in Discord #prompt.\n"
+            "You are Vishal Gupta's Priority #0 Standalone Cloud AI Agent running 24/7 in Discord #prompt with ZERO local device dependency.\n"
             f"Candidate Profile JSON: {profile_snippet}\n"
             f"Execution Host: {host_desc}\n"
             "STRICT PRIORITY #0 & HONESTY RULES:\n"
-            "1) IMMEDIATE PRIORITY EXECUTION: Every user command in #prompt has TOP PRIORITY over all background workers. Execute it IMMEDIATELY right now using `execute_shell_command` (and `scripts/priority_exec.py` for LinkedIn/email/apply/Mac tasks) and report the REAL verified result!\n"
+            "1) IMMEDIATE PRIORITY EXECUTION: Every user command in #prompt has TOP PRIORITY over all background workers. Execute it IMMEDIATELY right now on this Cloud VM using `execute_shell_command` (and `scripts/priority_exec.py` for email/apply tasks) and report the REAL verified result!\n"
             "2) CONTEXTUAL FOLLOW-UPS: Pay close attention to recent Discord channel conversation history! Combine multi-message instructions seamlessly.\n"
             "3) NEVER hallucinate or claim something was sent/applied unless `execute_shell_command` returned verified confirmation.\n"
             "4) NEVER mention past employer names under any circumstances.\n"
@@ -443,87 +397,9 @@ class DiscordListener:
             stop_typing.set()
 
     def run_antigravity_cli_turn(self, prompt: str, target_channel: str, msg_id: str) -> str:
-        """
-        Executes the prompt immediately on the 24/7 Cloud Gemini Tool-Agent (no 180s Mac AGY CLI bridge stalls!).
-        """
-        if not shutil.which(AGY_BIN) and not os.path.exists(AGY_BIN):
-            print(f"[DiscordCLI] Running 24/7 Cloud CLI Tool-Agent for prompt: {prompt}")
-            return self.ask_gemini_agent(prompt, target_channel=target_channel)
-
-        print(f"[DiscordCLI:AGY] Dispatching turn to Antigravity CLI: {prompt}")
-
-        stop_typing = threading.Event()
-        def keep_typing():
-            while not stop_typing.is_set():
-                try:
-                    self.client.trigger_typing(target_channel)
-                except Exception:
-                    pass
-                time.sleep(4)
-
-        t_thread = threading.Thread(target=keep_typing, daemon=True)
-        t_thread.start()
-
-        agy_session_dir = os.path.expanduser("~/.discord_agy_workspace")
-        os.makedirs(agy_session_dir, exist_ok=True)
-        init_marker = os.path.join(agy_session_dir, ".agy_initialized")
-        has_prior_session = os.path.exists(init_marker)
-
-        effective_prompt = prompt
-        if not has_prior_session:
-            effective_prompt = (
-                f"[Context: You are Vishal's Discord #prompt CLI agent. Workspace: {WORKSPACE_DIR}. "
-                f"Local Mac runs Ridealong (:9230) + `scripts/master_autonomous_cycle.py` (LinkedIn 1-task loop: 10 msgs @ 1m gap -> 10m connections or post-body feed hunt -> 10m LinkedIn Jobs -> repeat). "
-                f"OCI Cloud VM `opc@130.210.108.55` (`-i ~/Downloads/agent-vm-key.key`) runs 24/7 `linkedin-portal-worker` & `linkedin-email-worker`. "
-                f"Always inspect real processes/SQLite (`~/.linkedin_agent.db`) before claiming anything started or sent. Never leak past employer names.]\n\n"
-                f"User message: {prompt}"
-            )
-
-        def _invoke_agy(use_continue: bool, p_text: str):
-            cmd = [AGY_BIN]
-            if use_continue:
-                cmd.append("-c")
-            cmd.extend([
-                "-p", p_text,
-                "--add-dir", WORKSPACE_DIR,
-                "--dangerously-skip-permissions"
-            ])
-            return subprocess.run(cmd, cwd=agy_session_dir, capture_output=True, text=True, timeout=180)
-
-        try:
-            res = _invoke_agy(has_prior_session, effective_prompt)
-            stderr_lower = (res.stderr or "").lower()
-            # Self-heal if continuation fails (e.g., first run or corrupted thought signature)
-            if res.returncode != 0 and has_prior_session and any(
-                err_k in stderr_lower for err_k in ["no previous", "no conversation", "thought signature", "invalid_argument", "not found"]
-            ):
-                print("[DiscordCLI:AGY] Continuation session reset needed; starting fresh clean AGY conversation...")
-                res = _invoke_agy(False, effective_prompt)
-
-            stop_typing.set()
-            stdout = (res.stdout or "").strip()
-            stderr = (res.stderr or "").strip()
-
-            if res.returncode == 0 or stdout:
-                try:
-                    Path(init_marker).write_text("ok\n")
-                except Exception:
-                    pass
-
-            if stdout:
-                return stdout
-            elif stderr:
-                if "RESOURCE_EXHAUSTED" in stderr or "quota reached" in stderr:
-                    return self.ask_gemini_agent(prompt)
-                return f"⚠️ **CLI Notice:**\n```text\n{stderr[:1500]}\n```"
-            else:
-                return "✅ Action completed by Antigravity CLI."
-        except subprocess.TimeoutExpired:
-            stop_typing.set()
-            return "⏱️ Antigravity CLI execution timed out after 180 seconds."
-        except Exception as e:
-            stop_typing.set()
-            return f"❌ Antigravity CLI Error: `{e}`"
+        """Executes every turn directly on the 24/7 Cloud Gemini Tool-Agent (100% standalone, zero local device dependency)."""
+        print(f"[DiscordCLI] Running 24/7 Cloud CLI Tool-Agent for prompt: {prompt}")
+        return self.ask_gemini_agent(prompt, target_channel=target_channel)
 
     def process_command(self, content: str, msg_id: str, author_id: str, channel_id: str = None) -> None:
         """Parses and acts on instructions from Discord."""

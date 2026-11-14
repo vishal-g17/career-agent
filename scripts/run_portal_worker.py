@@ -86,9 +86,9 @@ def run_portal_worker():
             except Exception as he:
                 print(f"[PortalWorker] Discovery notice: {he}")
 
-        # 2. Process pending Naukri applications (if any)
+        # 2. Process pending Naukri applications periodically (stops immediately if datacenter IP is gated)
         naukri_p, redir_p, _ = get_pending_portal_counts()
-        if naukri_p > 0:
+        if naukri_p > 0 and (iteration == 1 or iteration % 30 == 0):
             try:
                 run_naukri_batch(limit=15)
             except Exception as nbe:

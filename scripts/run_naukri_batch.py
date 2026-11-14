@@ -84,8 +84,8 @@ def run_naukri_batch(limit: int = 50):
                 conn.commit()
                 print(f"[NaukriBatch] -> Already applied previously on Naukri (synced DB without duplicate alert).")
 
-            elif status == "needs_login":
-                print(f"[NaukriBatch] -> Naukri requires logged-in session; leaving jobs in 'new' queue and stopping batch.")
+            elif status in ("needs_login", "datacenter_blocked"):
+                print(f"[NaukriBatch] -> Naukri returned '{status}'; leaving jobs untouched and stopping batch cleanly.")
                 break
 
             elif status == "external_redirect":

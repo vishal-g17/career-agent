@@ -8,8 +8,6 @@ from typing import List, Dict, Any, Optional, Tuple
 from playwright.sync_api import sync_playwright
 from ..db import database
 
-RIDEALONG_CDP_ENDPOINT = "http://127.0.0.1:9230/default/multiplatform-hunter"
-
 TARGET_KEYWORDS = [
     "Associate Product Manager",
     "APM",
@@ -204,25 +202,8 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None, location: str
     seen_jks = set()
     
     try:
-        with sync_playwright() as p:
-            browser = None
-            is_local = False
-            try:
-                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
-                context = browser.contexts[0] if browser.contexts else browser.new_context()
-            except Exception:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
-                )
-                context = browser.new_context(
-                    user_agent=USER_AGENT,
-                    viewport={"width": 1366, "height": 768}
-                )
-                is_local = True
-
-            page = context.new_page()
-            
+        from ..services.cloud_browser import cloud_browser_page
+        with cloud_browser_page(None, block_media=True) as (page, context):
             for kw in keywords:
                 try:
                     q = urllib.parse.quote(kw)
@@ -261,17 +242,11 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None, location: str
                                 "platform": "Indeed",
                                 "keyword_matched": kw
                             })
-                        except Exception as ce:
+                        except Exception:
                             continue
                 except Exception as pe:
                     print(f"[JobHunter] Indeed scrape error for '{kw}': {pe}")
                     continue
-            page.close()
-            if is_local and browser:
-                try:
-                    browser.close()
-                except:
-                    pass
     except Exception as e:
         print(f"[JobHunter] Indeed scraper notice: {e}")
         
@@ -288,32 +263,16 @@ def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
     seen_urls = set()
     
     try:
-        with sync_playwright() as p:
-            browser = None
-            is_local = False
-            try:
-                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT, timeout=3000)
-                context = browser.contexts[0] if browser.contexts else browser.new_context()
-            except Exception:
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
-                )
-                context = browser.new_context(
-                    user_agent=USER_AGENT,
-                    viewport={"width": 1366, "height": 768}
-                )
-                is_local = True
-
-            page = context.new_page()
-            
+        from ..services.cloud_browser import cloud_browser_page
+        with cloud_browser_page("naukri", block_media=True) as (page, context):
             for kw in keywords:
                 try:
                     slug = kw.strip().lower().replace(" ", "-")
-                    # dayFilter=1 filters jobs posted in the last 24 hours
                     search_url = f"https://www.naukri.com/{slug}-jobs?dayFilter=1"
                     page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
                     page.wait_for_timeout(2000)
+                    if "access denied" in (page.title() or "").lower():
+                        break
                     
                     cards = page.locator(".srp-jobtuple-wrapper, div.cust-job-tuple").all()
                     for card in cards:
@@ -345,17 +304,11 @@ def scrape_fresh_naukri_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
                                 "platform": "Naukri",
                                 "keyword_matched": kw
                             })
-                        except Exception as ce:
+                        except Exception:
                             continue
                 except Exception as pe:
                     print(f"[JobHunter] Naukri scrape error for '{kw}': {pe}")
                     continue
-            page.close()
-            if is_local and browser:
-                try:
-                    browser.close()
-                except:
-                    pass
     except Exception as e:
         print(f"[JobHunter] Naukri scraper notice: {e}")
         
@@ -554,28 +507,17 @@ def scrape_fresh_lever_and_ashby_jobs() -> List[Dict[str, Any]]:
     return found
 
 
-def _has_local_ridealong_cdp() -> bool:
-    import socket
-    try:
-        with socket.create_connection(("127.0.0.1", 9230), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
 def run_job_hunt() -> Dict[str, Any]:
     """
-    Executes a high-speed unified multi-platform job hunting scan:
-      - Direct Greenhouse + Lever + Ashby JSON APIs (200+ boards in <5s, works 100% on Cloud VM)
+    Executes a high-speed 100% Cloud-standalone multi-platform job hunting scan (zero Local Mac dependency):
+      - Direct Greenhouse + Lever + Ashby JSON APIs (200+ boards in <5s, zero browser RAM)
       - LinkedIn guest search (parallelized)
-      - Indeed & Naukri authenticated browser scrapes ONLY when local Ridealong CDP is connected
-        (avoids 4-minute headless datacenter login-wall stalls on Cloud VM).
+      (Instahyre discovery & 1-click REST auto-apply runs via `src/services/instahyre_service.py` in `run_portal_worker.py`.)
     """
     from concurrent.futures import ThreadPoolExecutor
 
     all_fresh = []
     seen_in_run = set()
-    has_cdp = _has_local_ridealong_cdp()
 
     # 1. Direct Company ATS Boards FIRST (Greenhouse + Lever + Ashby — fast JSON APIs, zero login walls)
     for fn_name, fn in (("Greenhouse", scrape_fresh_greenhouse_jobs), ("Lever/Ashby", scrape_fresh_lever_and_ashby_jobs)):
@@ -598,24 +540,6 @@ def run_job_hunt() -> Dict[str, Any]:
                         all_fresh.append(j)
     except Exception as e:
         print(f"[JobHunter] LinkedIn parallel scan notice: {e}")
-
-    # 3. Authenticated browser scrapes ONLY when local Ridealong CDP session is active
-    if has_cdp:
-        try:
-            for j in scrape_fresh_indeed_jobs():
-                if j["dedup_id"] not in seen_in_run:
-                    seen_in_run.add(j["dedup_id"])
-                    all_fresh.append(j)
-        except Exception as e:
-            print(f"[JobHunter] Indeed batch run failed: {e}")
-
-        try:
-            for j in scrape_fresh_naukri_jobs():
-                if j["dedup_id"] not in seen_in_run:
-                    seen_in_run.add(j["dedup_id"])
-                    all_fresh.append(j)
-        except Exception as e:
-            print(f"[JobHunter] Naukri batch run failed: {e}")
 
     new_jobs = []
     hot_matches = []
