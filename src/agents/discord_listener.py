@@ -255,51 +255,97 @@ class DiscordListener:
         py_exec = sys.executable or "python3"
         db_loc = os.environ.get("DATABASE_PATH") or str(Path.home() / ".linkedin_agent.db")
         live_base = self.get_live_cloud_base_url().rstrip("/")
+        # Load candidate profile summary so Cloud Gemini always has Vishal's full resume/profile context
+        profile_snippet = ""
+        try:
+            prof_file = Path(WORKSPACE_DIR) / "src" / "profiles" / "candidate_profile.json"
+            if prof_file.exists():
+                prof_obj = json.loads(prof_file.read_text(encoding="utf-8"))
+                profile_snippet = json.dumps(
+                    {
+                        "personal": prof_obj.get("personal", {}),
+                        "education": prof_obj.get("education", {}),
+                        "skills_summary": prof_obj.get("skills_summary", {}),
+                        "screening_defaults": prof_obj.get("screening_defaults", {}),
+                    }
+                )
+        except Exception:
+            pass
+
         host_desc = (
             f"Local Mac (`{WORKSPACE_DIR}`), Python `{py_exec}`, DB `{db_loc}`."
             if is_mac else
             f"24/7 Oracle Cloud VM (`130.210.108.55`, workspace `{WORKSPACE_DIR}`, Python `{py_exec}`, SQLite DB `{db_loc}`). "
-            "Systemd services here: `linkedin-email-worker.service` (24/7 simultaneous Cold Email across `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com`), "
-            "`linkedin-bounce-monitor.service` (6s parallel IMAP bounce wiper & DB/sheet purger), "
-            "`linkedin-portal-worker.service` (24/7 Greenhouse/Lever/Ashby/Naukri turbo auto-apply), "
-            "`linkedin-dashboard.service` + `linkedin-dashboard-tunnel.service` "
-            f"(Live Master Sheet: `{live_base}/sheet`, Clean Excel Download: `{live_base}/download/MASTER_LEADS_SHEET.xlsx`, Clean CSV: `{live_base}/download/ACTIVE_DELIVERED_LEADS.csv`, Dashboard: `{live_base}/p/dashboard`), "
-            "and `linkedin-discord-listener.service` (this Discord CLI daemon). "
-            "Note on Job Applications & LinkedIn Posts: `scripts/priority_exec.py apply --url <url>` runs 24/7 directly on this Cloud VM! It automatically unwraps `lnkd.in/p/...` and `linkedin.com/posts/...` via OpenGraph HTML, extracts direct ATS links (Greenhouse, Lever, Ashby, Keka, Workday, Google Forms) + recruiter emails, and runs headless Playwright directly on the Cloud VM even when Vishal's Mac is asleep! Only pure `linkedin.com/jobs/view/...` Easy Apply pages and LinkedIn DMs require the residential Mac Ridealong session.\n"
+            "Systemd services running 24/7 here even when Vishal's Mac is completely OFF/asleep:\n"
+            "  • `linkedin-email-worker.service` (24/7 simultaneous Cold Email across `vishal.gupta.ug22@nsut.ac.in` & `vishal90301@gmail.com`)\n"
+            "  • `linkedin-bounce-monitor.service` (6s parallel IMAP bounce wiper & DB/sheet purger)\n"
+            "  • `linkedin-portal-worker.service` (24/7 Instahyre Zero-RAM REST Auto-Apply + Greenhouse/Lever/Ashby + Naukri)\n"
+            "  • `linkedin-dashboard.service` + `linkedin-dashboard-tunnel.service` "
+            f"(Live Master Sheet: `{live_base}/sheet`, Clean Excel Download: `{live_base}/download/MASTER_LEADS_SHEET.xlsx`, Clean CSV: `{live_base}/download/ACTIVE_DELIVERED_LEADS.csv`, Dashboard: `{live_base}/p/dashboard`)\n"
+            "  • `linkedin-discord-listener.service` (this 24/7 Discord `#prompt` CLI daemon)\n"
+            "SQLite DB Tables in `~/.linkedin_agent.db`:\n"
+            "  • `jobs(id, job_id, title, company, location, posted_at, url, match_score, scorecard, status, created_at)` — `status='applied'` ONLY for genuinely submitted & confirmed apps (includes Instahyre `id LIKE 'instahyre_%'`, Greenhouse, Lever, Ashby, Naukri, LinkedIn).\n"
+            "  • `outreach_leads(id, name, email, company, role_target, sender_email, status, first_sent_at, followup_1_at, followup_2_at, last_sent_at, followup_count, reply_snippet)` — `status IN ('pending', 'sent', 'replied', 'unresponsive')`.\n"
+            "  • `bounced_blocklist(email, reason, detected_at)` — dead/bounced addresses permanently blocked & deleted from `outreach_leads`.\n"
+            "  • `linkedin_connections_outreach(id, name, headline, status, sent_at)` — LinkedIn 1st-degree DMs.\n"
+            "Note on Job Applications & Portals when Mac is Asleep:\n"
+            "  • `scripts/priority_exec.py apply --url <url>` runs 24/7 directly on this Cloud VM! It natively submits Instahyre (`instahyre.com`), Greenhouse, Lever, Ashby, Keka, Workday, Google Forms, AND unwraps `lnkd.in/p/...` posts + sends immediate cold emails to recruiters!\n"
+            "  • Batch Instahyre sweep on demand: `from src.services.instahyre_service import run_instahyre_auto_apply; run_instahyre_auto_apply(max_apps=10)`.\n"
+            "  • ONLY LinkedIn 1st-degree DMs and LinkedIn Easy Apply (`linkedin.com/jobs/view/...`) require Vishal's residential Mac Chrome (`Ridealong`) to be awake (because LinkedIn blocks cloud datacenter IPs).\n"
             f"• To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} {WORKSPACE_DIR}/src/services/linkedin_control.py stop` or `start` or `status`.\n"
             "• 🚨 ABSOLUTE HONESTY & INTEGRITY LAW:\n"
             "  - NEVER run raw SQL (`UPDATE jobs SET status='applied'` or `INSERT INTO jobs`) to fake job applications! That is strictly blocked by the firewall.\n"
-            "  - NEVER say Greenhouse, Lever, Ashby, Keka, or `lnkd.in/p/...` links cannot be automated from the Cloud VM — ALWAYS run `priority_exec.py apply --url <url>` immediately and report its real output!\n"
+            "  - NEVER say Instahyre, Greenhouse, Lever, Ashby, Keka, or `lnkd.in/p/...` links cannot be automated from the Cloud VM — ALWAYS run `priority_exec.py apply --url <url>` immediately and report its real output!\n"
             "• 🚨 PRIORITY #0 IMMEDIATE EXECUTION LAW (APPLIES TO EVERY TASK — LINKEDIN, EMAIL, PORTALS, DATA, SHEET, CONFIG):\n"
             "  Whenever Vishal asks you to do ANYTHING in `#prompt`, DO IT IMMEDIATELY ON PRIORITY #0 RIGHT NOW! NEVER queue his request behind background batches and NEVER reply 'Queued, will run later'!\n"
             "  Use the unified synchronous Priority #0 Executor (which executes immediately and waits for real verified completion before returning):\n"
             f"  1) **Send LinkedIn Message (Custom Text OR Job Pitch+CV) / Connect:**\n"
-            f"     - Custom message (e.g. 'Send hello pagal to Shivani Gupta'):\n"
-            f"       `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py linkedin-msg --query \"Shivani Gupta\" --name \"Shivani Gupta\" --custom-message \"Hello pagal\" --channel \"{target_channel or self.channel_id}\"`\n"
-            f"     - Job outreach pitch + CV (e.g. 'Send linkedin msg to Rahul at Razorpay as PM'):\n"
-            f"       `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py linkedin-msg --query \"Rahul Razorpay PM\" --name \"Rahul\" --company \"Razorpay\" --role \"PM\" --channel \"{target_channel or self.channel_id}\"`\n"
+            f"     - Custom message: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py linkedin-msg --query \"Shivani Gupta\" --name \"Shivani Gupta\" --custom-message \"Hello\" --channel \"{target_channel or self.channel_id}\"`\n"
+            f"     - Job outreach pitch + CV: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py linkedin-msg --query \"Rahul Razorpay PM\" --name \"Rahul\" --company \"Razorpay\" --role \"PM\" --channel \"{target_channel or self.channel_id}\"`\n"
             f"  2) **Send Immediate Email (Custom OR Cold Pitch+CV — bypasses 2,200-lead queue!):**\n"
             f"     - Cold pitch + CV right now: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py email --to \"hr@company.com\" --name \"HR\" --company \"Company\" --role \"APM\"`\n"
             f"     - Custom email right now: `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py email --to \"x@y.com\" --subject \"...\" --body \"...\" --no-cv`\n"
-            f"  3) **Apply Immediately to Any Job / Form URL (LinkedIn, Greenhouse, Lever, Ashby, Google Form):**\n"
+            f"  3) **Apply Immediately to Any Job / Form URL (Instahyre, LinkedIn, Greenhouse, Lever, Ashby, Google Form):**\n"
             f"     `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py apply --url \"<job_url>\" --role \"Product Analyst\" --channel \"{target_channel or self.channel_id}\"`\n"
             f"  4) **Run Any Urgent Command on Local Mac:**\n"
             f"     `{py_exec} {WORKSPACE_DIR}/scripts/priority_exec.py mac-sh --cmd \"<command>\" --channel \"{target_channel or self.channel_id}\"`\n"
-            f"  5) **Any Cloud DB / Sheet / Worker Edit:** Execute inline immediately via `execute_shell_command` on `{db_loc}` / `{WORKSPACE_DIR}` and verify!"
+            f"  5) **Any Cloud DB / Sheet / Worker Edit or Question Answering:** Execute inline immediately via `execute_shell_command` on `{db_loc}` / `{WORKSPACE_DIR}` and verify!"
         )
         system_context = (
             "You are Vishal Gupta's Priority #0 Autonomous CLI Agent running 24/7 in Discord #prompt.\n"
+            f"Candidate Profile JSON: {profile_snippet}\n"
             f"Execution Host: {host_desc}\n"
             "STRICT PRIORITY #0 & HONESTY RULES:\n"
             "1) IMMEDIATE PRIORITY EXECUTION: Every user command in #prompt has TOP PRIORITY over all background workers. Execute it IMMEDIATELY right now using `execute_shell_command` (and `scripts/priority_exec.py` for LinkedIn/email/apply/Mac tasks) and report the REAL verified result!\n"
-            "2) CONTEXTUAl FOLLOW-UPS: Pay close attention to recent conversation history! For example, if the user says 'Send hello pagal' and then 'To shivani gupta', combine them and immediately send the exact custom LinkedIn message `Hello pagal` to `Shivani Gupta` using `priority_exec.py linkedin-msg --custom-message \"Hello pagal\"`!\n"
-            "3) NEVER hallucinate or claim something was sent unless `execute_shell_command` returned verified confirmation.\n"
+            "2) CONTEXTUAL FOLLOW-UPS: Pay close attention to recent Discord channel conversation history! Combine multi-message instructions seamlessly.\n"
+            "3) NEVER hallucinate or claim something was sent/applied unless `execute_shell_command` returned verified confirmation.\n"
             "4) NEVER mention past employer names under any circumstances.\n"
             "5) Keep responses concise, factual, and formatted in clean Markdown."
         )
 
-        contents: List[Dict[str, Any]] = list(self.turn_history[-12:])
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        # Hydrate conversation history directly from real Discord channel messages so context is NEVER lost across restarts or Mac sleep/wake!
+        contents: List[Dict[str, Any]] = []
+        try:
+            ch_to_read = target_channel or self.channel_id
+            recent_discord = self.client.get_channel_messages(ch_to_read, limit=10)
+            for dm in reversed(recent_discord):
+                dm_txt = (dm.get("content") or "").strip()
+                if not dm_txt or dm_txt == prompt.strip():
+                    continue
+                dm_role = "model" if (dm.get("author") or {}).get("bot") else "user"
+                if contents and contents[-1]["role"] == dm_role:
+                    contents[-1]["parts"][0]["text"] += "\n" + dm_txt[:1000]
+                else:
+                    contents.append({"role": dm_role, "parts": [{"text": dm_txt[:1000]}]})
+            # Gemini requires `contents` to start with a `user` turn
+            while contents and contents[0]["role"] != "user":
+                contents.pop(0)
+        except Exception:
+            contents = list(self.turn_history[-10:])
+        if contents and contents[-1]["role"] == "user":
+            contents[-1]["parts"][0]["text"] += "\n" + prompt
+        else:
+            contents.append({"role": "user", "parts": [{"text": prompt}]})
 
         tools_spec = [{
             "functionDeclarations": [{
@@ -315,7 +361,7 @@ class DiscordListener:
             }]
         }]
 
-        models_to_try = ["gemini-3-flash-preview", "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+        models_to_try = ["gemini-3-flash-preview", "gemini-2.5-pro", "gemini-2.5-flash"]
         active_model_idx = 0
 
         try:
@@ -524,6 +570,7 @@ class DiscordListener:
         import re
         urls_in_msg = [u.rstrip(".,;>)") for u in re.findall(r"https?://[^\s<>]+", text)]
         job_url_domains = (
+            "instahyre.com", "naukri.com",
             "greenhouse.io", "lever.co", "ashbyhq.com", "keka.com", "myworkdayjobs.com",
             "lnkd.in/", "linkedin.com/posts/", "linkedin.com/feed/update/", "linkedin.com/jobs/",
             "forms.gle", "docs.google.com/forms", "smartrecruiters.com", "bamboohr.com",
