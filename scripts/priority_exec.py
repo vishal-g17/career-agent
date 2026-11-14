@@ -82,6 +82,21 @@ def dispatch_and_wait_mac(task_type: str, payload: Dict[str, Any], channel_id: s
     )
 
 
+def _get_ridealong_viewer_url() -> str:
+    try:
+        import glob
+        logs = sorted(glob.glob(os.path.expanduser("~/.gemini/antigravity-cli/brain/*/.system_generated/tasks/*.log")), key=os.path.getmtime, reverse=True)
+        for lp in logs[:25]:
+            txt = Path(lp).read_text(encoding="utf-8", errors="ignore")
+            if "127.0.0.1:8083" in txt or "localhost:8083" in txt:
+                ms = re.findall(r"https://[a-z0-9-]+\.trycloudflare\.com", txt)
+                if ms:
+                    return ms[-1]
+    except Exception:
+        pass
+    return "http://127.0.0.1:8083"
+
+
 def execute_mac_task_locally(task_type: str, payload: Dict[str, Any]) -> str:
     if task_type == "linkedin_msg":
         from scripts.send_linkedin_person_msg import send_person_outreach
@@ -95,16 +110,108 @@ def execute_mac_task_locally(task_type: str, payload: Dict[str, Any]) -> str:
         )
         return res.get("message") or json.dumps(res)
     elif task_type == "linkedin_apply":
-        import subprocess
-        url = payload.get("url", "")
-        proc = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "scripts" / "linkedin_single_task.py"), "apply", url],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        return (proc.stdout or proc.stderr or "Completed.").strip()[:1800]
+        import hashlib
+        from playwright.sync_api import sync_playwright
+        from scripts.send_linkedin_person_msg import get_direct_cdp_endpoint, DEVTOOLS_PORT_FILE
+        from src.agents.linkedin_job_applicant import _acquire_cdp_page, _try_apply_on_loaded_linkedin_job, _sync_job_statuses_to_cloud_vm
+
+        url = payload.get("url", "").strip()
+        jid = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+        port = DEVTOOLS_PORT_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
+        cdp_ep = get_direct_cdp_endpoint()
+        conn = sqlite3.connect(DB_PATH, timeout=20.0)
+        ok = False
+        try:
+            with sync_playwright() as p:
+                b = p.chromium.connect_over_cdp(cdp_ep, timeout=12000)
+                pg, ctx = _acquire_cdp_page(b, port)
+                try:
+                    ok = _try_apply_on_loaded_linkedin_job(pg, ctx, port, jid, "Product / Business Analyst", "LinkedIn", url, conn)
+                finally:
+                    try:
+                        pg.close()
+                    except Exception:
+                        pass
+            _sync_job_statuses_to_cloud_vm(conn)
+        finally:
+            conn.close()
+        if ok:
+            return f"✅ **LinkedIn Job Application Submitted & Confirmed Immediately!**\n• **URL:** {url}"
+        return f"⚠️ **LinkedIn Job Attempted — Not Auto-Confirmed (`NOT` marked applied):**\n• **URL:** {url}\n• Either already applied, closed, or gated by an external portal verification."
+    elif task_type == "ats_apply":
+        from playwright.sync_api import sync_playwright
+        from scripts.send_linkedin_person_msg import get_direct_cdp_endpoint, DEVTOOLS_PORT_FILE
+        from src.agents.linkedin_job_applicant import _acquire_cdp_page
+        from src.services.ats_filler import fill_ats_application
+        from src.agents.discord_notifier import DiscordNotifier
+
+        url = payload.get("url", "").strip()
+        role_hint = payload.get("role") or "Product / Business Analyst"
+        port = DEVTOOLS_PORT_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
+        cdp_ep = get_direct_cdp_endpoint()
+        with sync_playwright() as p:
+            b = p.chromium.connect_over_cdp(cdp_ep, timeout=12000)
+            pg, _ = _acquire_cdp_page(b, port)
+            res = fill_ats_application(url, role_title=role_hint, auto_submit=True, existing_page=pg, leave_open=True)
+            final_u = res.get("ats_url") or url
+            ats_t = res.get("ats_type") or "generic"
+            err = res.get("error") or ""
+            if res.get("submitted") and res.get("confirmed"):
+                try:
+                    pg.close()
+                except Exception:
+                    pass
+                _record_job_attempt(final_u, role_hint, ats_t.upper(), "applied", ats_t)
+                try:
+                    DiscordNotifier().send_application_alert({
+                        "company": ats_t.upper(),
+                        "role": role_hint,
+                        "platform": f"Persistent Chrome CDP ({ats_t.upper()})",
+                        "url": final_u,
+                        "status": "SUBMITTED & CONFIRMED",
+                        "details": f"Filled {len(res.get('fields_filled', []))} fields + uploaded Vishal_Gupta_Resume.pdf via Ridealong CDP!",
+                        "resume": "Vishal_Gupta_Resume.pdf",
+                    })
+                except Exception:
+                    pass
+                return (
+                    f"✅ **Application Submitted & Confirmed Immediately (Persistent Chrome CDP)!**\n"
+                    f"• **ATS:** `{ats_t}`\n"
+                    f"• **URL:** {final_u}\n"
+                    f"• **Fields Filled:** `{len(res.get('fields_filled', []))}` | **Resume Uploaded:** `{res.get('resume_uploaded')}`"
+                )
+            if err == "expired":
+                try:
+                    pg.close()
+                except Exception:
+                    pass
+                _record_job_attempt(final_u, role_hint, ats_t.upper(), "expired", ats_t, "expired")
+                return f"⚠️ **Job Expired / Closed by Company (`404`):** {final_u}"
+            if err in ("human_verification_code_required_in_email", "captcha_gate_requires_manual_apply"):
+                _record_job_attempt(final_u, role_hint, ats_t.upper(), "external_pending_review", ats_t, err)
+                viewer = _get_ridealong_viewer_url()
+                if err == "human_verification_code_required_in_email":
+                    return (
+                        f"🛡️ **100% Pre-Filled in Ridealong — Only 8-Char Email Code Needed (`NOT` marked applied yet):**\n"
+                        f"• **Portal:** `{ats_t}` ({final_u})\n"
+                        f"• **Pre-Filled:** `{len(res.get('fields_filled', []))}` fields + `Vishal_Gupta_Resume.pdf` left open in your Ridealong browser!\n"
+                        f"• **5-Second Finish:** Open {viewer} and paste the 8-character security code sent to `vishal90301@gmail.com`."
+                    )
+                return (
+                    f"🛡️ **Pre-Filled up to CAPTCHA Gate (`NOT` marked applied — 100% honest status):**\n"
+                    f"• **Portal:** `{ats_t}` ({final_u})\n"
+                    f"• **Live Pre-Filled Tab:** {viewer} (or click {final_u} directly)."
+                )
+            try:
+                pg.close()
+            except Exception:
+                pass
+            _record_job_attempt(final_u, role_hint, ats_t.upper(), "external_pending_review", ats_t, err)
+            return (
+                f"⚠️ **Application Attempted — Not Confirmed (`NOT` marked applied):**\n"
+                f"• **Portal:** `{ats_t}` ({final_u})\n"
+                f"• **Reason:** `{err or 'unconfirmed_after_submit'}` | **Fields Filled:** `{len(res.get('fields_filled', []))}`"
+            )
     elif task_type == "mac_sh":
         import subprocess
         proc = subprocess.run(
@@ -192,16 +299,13 @@ def _is_mac_awake() -> bool:
     if sys.platform == "darwin":
         return True
     try:
-        ctl_path = Path.home() / ".linkedin_control.json"
-        if ctl_path.exists():
-            # Check file mtime (updated on Mac heartbeats or recent priority claims)
-            pass
-        conn = sqlite3.connect(DB_PATH, timeout=10.0)
-        # Also check ~/.linkedin_control.json last_mac_heartbeat or recent bridge poll
-        conn.close()
+        hb = Path("/tmp/mac_bridge_heartbeat")
+        if hb.exists():
+            age = time.time() - float(hb.read_text(encoding="utf-8").strip())
+            return age < 20.0
     except Exception:
         pass
-    return True
+    return False
 
 
 def unwrap_linkedin_short_or_post_url(raw_url: str) -> Dict[str, Any]:
@@ -347,6 +451,18 @@ def run_priority_apply(args) -> str:
         return "\n\n".join(notes + [f"⚠️ **Google Form Not Confirmed (`{gf_res.get('error')}`):** {url}"])
 
     # 4. Direct Company ATS / Career Portal (Greenhouse, Lever, Ashby, Keka, Workday, iCIMS, etc.)
+    # When Mac Ridealong Bridge is online, execute via Persistent Residential Chrome CDP first to avoid datacenter IP flags!
+    if _is_mac_awake():
+        mac_out = dispatch_and_wait_mac("ats_apply", {"url": url, "role": role_hint}, channel_id=args.channel, timeout_s=65.0)
+        if sys.platform != "darwin":
+            if mac_out.startswith("✅"):
+                _record_job_attempt(url, role_hint, "ATS", "applied", "persistent_cdp")
+            elif "Job Expired" in mac_out:
+                _record_job_attempt(url, role_hint, "ATS", "expired", "persistent_cdp", "expired")
+            elif not mac_out.startswith("⏳"):
+                _record_job_attempt(url, role_hint, "ATS", "external_pending_review", "persistent_cdp", "gated")
+        return ("\n\n".join(notes + [mac_out])).strip()
+
     from src.services.ats_filler import fill_ats_application
     res = fill_ats_application(url, role_title=role_hint, auto_submit=True)
     final_ats_url = res.get("ats_url") or url

@@ -751,13 +751,13 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     3. Random Wait #3 (1.5–5m) + Randomized LinkedIn Jobs Apply (6–12m, strict receipt verification).
     4. Random Cool-Down (1.5–4.5m) before starting the next randomized message batch.
     """
-    wait1_mins = round(random.uniform(4.0, 17.5), 1)
-    feed_gap_mins = round(random.uniform(1.5, 5.0), 1)
-    feed_dur_mins = round(random.uniform(5.5, 11.5), 1)
-    jobs_gap_mins = round(random.uniform(1.5, 5.0), 1)
-    jobs_dur_mins = random.randint(6, 12)
-    jobs_max_apps = random.randint(4, 7)
-    end_gap_mins = round(random.uniform(1.5, 4.5), 1)
+    wait1_mins = round(random.uniform(3.0, 9.0), 1)
+    feed_gap_mins = round(random.uniform(1.0, 3.0), 1)
+    feed_dur_mins = round(random.uniform(5.0, 9.0), 1)
+    jobs_gap_mins = round(random.uniform(1.0, 3.0), 1)
+    jobs_dur_mins = random.randint(8, 13)
+    jobs_max_apps = random.randint(6, 10)
+    end_gap_mins = round(random.uniform(1.5, 3.5), 1)
 
     print("\n" + "="*70)
     print(

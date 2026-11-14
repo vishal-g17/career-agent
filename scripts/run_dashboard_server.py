@@ -334,6 +334,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.send_response(403)
                 self.end_headers()
                 return
+            try:
+                Path("/tmp/mac_bridge_heartbeat").write_text(str(time.time()), encoding="utf-8")
+            except Exception:
+                pass
             conn = sqlite3.connect(str(DB_PATH), timeout=20.0)
             _ensure_priority_table(conn)
             cur = conn.cursor()

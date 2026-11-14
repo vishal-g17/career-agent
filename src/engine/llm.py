@@ -16,6 +16,8 @@ GEMINI_MODELS = [
     "gemini-3.5-flash-lite",
 ]
 
+_MODEL_COOLDOWN_UNTIL: dict[str, float] = {}
+
 
 def _call_claude(model: str, prompt: str, system_instruction: Optional[str], temperature: float, api_key: str) -> Optional[str]:
     """Call Anthropic Messages API. Returns text or None on failure."""
@@ -81,7 +83,7 @@ def _call_gemini(model: str, prompt: str, system_instruction: Optional[str], tem
 
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=9) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
                 candidates = body.get("candidates", [])
                 if candidates:
@@ -90,11 +92,18 @@ def _call_gemini(model: str, prompt: str, system_instruction: Optional[str], tem
                     if texts:
                         return "".join(texts).strip()
         except urllib.error.HTTPError as e:
+            if e.code == 404:
+                _MODEL_COOLDOWN_UNTIL[model] = time.time() + 3600.0
+                return None
             if e.code in (429, 503):
-                time.sleep(1.5)
-                continue
+                if attempt == 0:
+                    time.sleep(0.6)
+                    continue
+                _MODEL_COOLDOWN_UNTIL[model] = time.time() + 90.0
+                return None
             return None
         except Exception:
+            _MODEL_COOLDOWN_UNTIL[model] = time.time() + 45.0
             return None
     return None
 
@@ -121,11 +130,19 @@ def generate_text(prompt: str, system_instruction: Optional[str] = None, tempera
 
     # Fallback to Gemini (free tier)
     if gemini_key:
+        now = time.time()
         for model in GEMINI_MODELS:
+            if _MODEL_COOLDOWN_UNTIL.get(model, 0.0) > now:
+                continue
             result = _call_gemini(model, prompt, system_instruction, temperature, gemini_key)
             if result:
                 print(f"[LLM] Used {model}")
                 return result
             print(f"[LLM] {model} failed, trying next...")
+        # Last-resort retry ignoring cooldown if all cooled down
+        for model in reversed(GEMINI_MODELS):
+            result = _call_gemini(model, prompt, system_instruction, temperature, gemini_key)
+            if result:
+                return result
 
     raise RuntimeError("All LLM backends exhausted. Check ANTHROPIC_API_KEY and/or GEMINI_API_KEY.")

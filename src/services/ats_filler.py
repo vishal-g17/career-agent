@@ -292,6 +292,8 @@ def _decide_yes_no_or_option(question_text: str, option_labels: List[str], role_
             "visa",
             "previously worked",
             "ever worked",
+            "ever been employed",
+            "employed by",
             "worked at",
             "worked for",
             "formerly employed",
@@ -557,6 +559,21 @@ def fill_ats_application(
                 result["error"] = "blacklisted_employer"
                 return result
 
+            try:
+                early_body = (page.locator("body").inner_text() or "").strip().lower()
+                if (
+                    "sorry, but we can't find that page" in early_body
+                    or "job you are looking for is no longer open" in early_body
+                    or "position has been filled" in early_body
+                    or "no longer accepting applications" in early_body
+                    or "the job you requested was not found" in early_body
+                    or "the page you requested was not found" in early_body
+                ):
+                    result["error"] = "expired"
+                    return result
+            except Exception:
+                pass
+
             if _has_interactive_captcha(page) and not leave_open:
                 print("[ATSFiller] Active CAPTCHA / anti-bot gate detected; skipping manual verification portal.")
                 result["error"] = "captcha_gate_requires_manual_apply"
@@ -635,6 +652,21 @@ def fill_ats_application(
                         pass
 
             # Re-check CAPTCHA after following Apply transition (e.g. Jibe -> iCIMS or Keka)
+            try:
+                early_body = (page.locator("body").inner_text() or "").strip().lower()
+                if (
+                    "sorry, but we can't find that page" in early_body
+                    or "job you are looking for is no longer open" in early_body
+                    or "position has been filled" in early_body
+                    or "no longer accepting applications" in early_body
+                    or "the job you requested was not found" in early_body
+                    or "the page you requested was not found" in early_body
+                ):
+                    result["error"] = "expired"
+                    return result
+            except Exception:
+                pass
+
             if _has_interactive_captcha(page) and not leave_open:
                 print("[ATSFiller] CAPTCHA gate detected on application form; refusing to bypass.")
                 result["error"] = "captcha_gate_requires_manual_apply"
@@ -736,58 +768,105 @@ def fill_ats_application(
                             continue
 
                         if cb_id == "candidate-location" or "location (city)" in cb_ctx_l:
-                            cb.click(timeout=2500)
-                            cb.press_sequentially("Gurugram", delay=70)
-                            page.wait_for_timeout(2000)
-                            opt = page.locator('[role="option"]').first
-                            if opt.count() > 0 and opt.is_visible():
-                                opt_txt = (opt.inner_text() or "").strip()
-                                opt.click(timeout=2000)
-                                result["fields_filled"].append({"field": "candidate-location", "value": opt_txt[:40]})
-                            else:
-                                page.keyboard.press("Control+A")
-                                page.keyboard.press("Meta+A")
-                                page.keyboard.press("Backspace")
-                                cb.press_sequentially("New Delhi", delay=70)
-                                page.wait_for_timeout(2000)
-                                opt2 = page.locator('[role="option"]').first
-                                if opt2.count() > 0 and opt2.is_visible():
-                                    opt_txt2 = (opt2.inner_text() or "").strip()
-                                    opt2.click(timeout=2000)
-                                    result["fields_filled"].append({"field": "candidate-location", "value": opt_txt2[:40]})
-                                else:
-                                    page.keyboard.press("ArrowDown")
-                                    page.keyboard.press("Enter")
-                            page.wait_for_timeout(300)
+                            cb.scroll_into_view_if_needed(timeout=2000)
+                            cb.click(timeout=2500, force=True)
+                            matched_loc = False
+                            for loc_q in ("Gurugram, Haryana, India", "New Delhi, Delhi, India", "Bengaluru, Karnataka, India"):
+                                cb.fill("")
+                                cb.press_sequentially(loc_q, delay=45)
+                                page.wait_for_timeout(1800)
+                                vis_opts = [o for o in page.locator('[role="option"]').all() if o.is_visible()]
+                                india_opt = next(
+                                    (o for o in vis_opts if "india" in (o.inner_text() or "").lower()),
+                                    vis_opts[0] if vis_opts else None,
+                                )
+                                if india_opt is not None:
+                                    opt_txt = (india_opt.inner_text() or "").strip()
+                                    if "no options" not in opt_txt.lower():
+                                        india_opt.click(timeout=2000)
+                                        result["fields_filled"].append({"field": "candidate-location", "value": opt_txt[:40]})
+                                        matched_loc = True
+                                        break
+                            if not matched_loc:
+                                page.keyboard.press("Escape")
+                            page.wait_for_timeout(250)
                             continue
 
                         if cb_id.startswith("school"):
-                            cb.click(timeout=2500)
-                            page.keyboard.type("Netaji Subhas")
-                            page.wait_for_timeout(1000)
-                            opt = page.locator('[role="option"]').first
-                            if opt.count() > 0 and opt.is_visible():
-                                opt.click(timeout=2000)
-                            page.keyboard.press("Escape")
+                            cb.scroll_into_view_if_needed(timeout=2000)
+                            cb.click(timeout=2500, force=True)
+                            for sq in ("Netaji Subhas", "University of Delhi", "Other"):
+                                cb.fill(sq)
+                                page.wait_for_timeout(1200)
+                                vis_s = [
+                                    o for o in page.locator('[role="option"]').all()
+                                    if o.is_visible() and "no options" not in (o.inner_text() or "").lower()
+                                ]
+                                if vis_s:
+                                    stxt = (vis_s[0].inner_text() or "").strip()
+                                    vis_s[0].click(timeout=2000)
+                                    result["fields_filled"].append({"field": cb_id, "value": stxt[:40]})
+                                    break
+                            page.wait_for_timeout(200)
                             continue
 
                         if cb_id.startswith("degree"):
-                            cb.click(timeout=2500)
-                            page.wait_for_timeout(500)
-                            opt = page.locator('[role="option"]:has-text("Bachelor")').first
-                            if opt.count() > 0 and opt.is_visible():
-                                opt.click(timeout=2000)
-                            page.keyboard.press("Escape")
+                            cb.scroll_into_view_if_needed(timeout=2000)
+                            cb.click(timeout=2500, force=True)
+                            page.wait_for_timeout(600)
+                            vis_d = [o for o in page.locator('[role="option"]').all() if o.is_visible()]
+                            if not vis_d:
+                                cb.fill("Bachelor")
+                                page.wait_for_timeout(700)
+                                vis_d = [o for o in page.locator('[role="option"]').all() if o.is_visible()]
+                            deg_opt = next(
+                                (
+                                    o for o in vis_d
+                                    if any(k in (o.inner_text() or "").lower() for k in ["bachelor", "b.tech", "b.s", "b.e", "undergraduate"])
+                                ),
+                                vis_d[0] if vis_d else None,
+                            )
+                            if deg_opt is not None:
+                                dtxt = (deg_opt.inner_text() or "").strip()
+                                deg_opt.click(timeout=2000)
+                                result["fields_filled"].append({"field": cb_id, "value": dtxt[:40]})
+                            else:
+                                page.keyboard.press("Escape")
+                            page.wait_for_timeout(200)
                             continue
 
                         if cb_id.startswith("discipline"):
-                            cb.click(timeout=2500)
-                            page.keyboard.type("Computer Science")
-                            page.wait_for_timeout(600)
-                            opt = page.locator('[role="option"]:has-text("Computer Science")').first
-                            if opt.count() > 0 and opt.is_visible():
-                                opt.click(timeout=2000)
-                            page.keyboard.press("Escape")
+                            cb.scroll_into_view_if_needed(timeout=2000)
+                            cb.click(timeout=2500, force=True)
+                            cb.fill("Computer Science")
+                            page.wait_for_timeout(900)
+                            vis_disc = [
+                                o for o in page.locator('[role="option"]').all()
+                                if o.is_visible() and "no options" not in (o.inner_text() or "").lower()
+                            ]
+                            if vis_disc:
+                                disctxt = (vis_disc[0].inner_text() or "").strip()
+                                vis_disc[0].click(timeout=2000)
+                                result["fields_filled"].append({"field": cb_id, "value": disctxt[:40]})
+                            else:
+                                page.keyboard.press("Escape")
+                            page.wait_for_timeout(200)
+                            continue
+
+                        if cb_id.startswith("start-month") or cb_id.startswith("end-month"):
+                            target_m = "august" if cb_id.startswith("start-month") else "may"
+                            cb.scroll_into_view_if_needed(timeout=2000)
+                            cb.click(timeout=2500, force=True)
+                            page.wait_for_timeout(450)
+                            vis_m = [o for o in page.locator('[role="option"]').all() if o.is_visible()]
+                            m_opt = next((o for o in vis_m if target_m in (o.inner_text() or "").lower()), vis_m[0] if vis_m else None)
+                            if m_opt is not None:
+                                mtxt = (m_opt.inner_text() or "").strip()
+                                m_opt.click(timeout=2000)
+                                result["fields_filled"].append({"field": cb_id, "value": mtxt[:20]})
+                            else:
+                                page.keyboard.press("Escape")
+                            page.wait_for_timeout(200)
                             continue
 
                         # General question combobox: click to open options menu
@@ -894,6 +973,15 @@ def fill_ats_application(
                             raw_phone = re.sub(r"^\+?91", "", p.get("phone", "8368387245")).strip()
                             inp.fill(raw_phone)
                             result["fields_filled"].append({"field": "phone", "value": raw_phone})
+                            continue
+
+                        if id_attr.startswith("start-year") or ("start" in field_identifier and "year" in field_identifier):
+                            inp.fill("2022")
+                            result["fields_filled"].append({"field": id_attr or "start-year", "value": "2022"})
+                            continue
+                        if id_attr.startswith("end-year") or ("end" in field_identifier and "year" in field_identifier):
+                            inp.fill("2026")
+                            result["fields_filled"].append({"field": id_attr or "end-year", "value": "2026"})
                             continue
 
                         matched_val = answer_standard_field(field_identifier)
@@ -1184,12 +1272,6 @@ def fill_ats_application(
                     for wait_ms in (4000, 4500):
                         page.wait_for_timeout(wait_ms)
 
-                        if _has_interactive_captcha(page):
-                            print("[ATSFiller] Interactive CAPTCHA challenge appeared after Submit; refusing to bypass or mark applied.")
-                            result["confirmed"] = False
-                            result["error"] = "captcha_gate_requires_manual_apply"
-                            break
-
                         post_url = page.url.lower()
                         try:
                             post_text = page.locator("body").inner_text().lower()
@@ -1199,10 +1281,20 @@ def fill_ats_application(
                         # Strict compliance: if Greenhouse or ATS shows a human-confirmation security code gate,
                         # report it honestly without attempting to bypass 'confirm you're a human'.
                         sec_inp0 = page.locator("input#security-input-0, input[id^='security-input-']").first
-                        if (sec_inp0.count() > 0 and sec_inp0.is_visible()) or "security code" in post_text or "verification code" in post_text:
+                        if (
+                            (sec_inp0.count() > 0 and sec_inp0.is_visible())
+                            or "verification code was sent to" in post_text
+                            or ("security code" in post_text and "8-character" in post_text)
+                        ):
                             print("[ATSFiller] ATS requested candidate human-verification email code; stopping cleanly for user input.")
                             result["confirmed"] = False
                             result["error"] = "human_verification_code_required_in_email"
+                            break
+
+                        if _has_interactive_captcha(page):
+                            print("[ATSFiller] Interactive CAPTCHA challenge appeared after Submit; refusing to bypass or mark applied.")
+                            result["confirmed"] = False
+                            result["error"] = "captcha_gate_requires_manual_apply"
                             break
 
                         error_phrases = [

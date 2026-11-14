@@ -58,9 +58,15 @@ def answer_standard_field(field_name: str, options: Optional[list] = None) -> Op
     if any(k in fn_lower for k in ["degree", "major", "branch", "stream"]):
         return edu.get("major", "Computer Science & Engineering (Mathematics & Computing)")
 
-    # Graduation Year
-    if any(k in fn_lower for k in ["graduation", "passing year", "batch", "grad year"]):
+    # Education Start / End Year & Graduation Year
+    if "start" in fn_lower and "year" in fn_lower:
+        return "2022"
+    if ("end" in fn_lower and "year" in fn_lower) or any(k in fn_lower for k in ["graduation", "passing year", "batch", "grad year"]):
         return edu.get("graduation_year", "2026")
+    if "start" in fn_lower and "month" in fn_lower:
+        return "August"
+    if "end" in fn_lower and "month" in fn_lower:
+        return "May"
 
     # CGPA
     if "cgpa" in fn_lower or "gpa" in fn_lower:
