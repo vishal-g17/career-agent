@@ -174,6 +174,10 @@ def build_dashboard_html() -> str:
             applied_via = 'LinkedIn Easy Apply'
         elif 'naukri' in u_low:
             applied_via = 'Naukri Auto-Apply'
+        elif 'indeed.com' in u_low or 'indeed' in str(applied_via).lower():
+            applied_via = 'Indeed SmartApply'
+        elif 'pyjamahr.com' in u_low:
+            applied_via = 'PyjamaHR ATS'
         elif 'greenhouse.io' in u_low or 'gh_jid' in u_low:
             applied_via = 'Greenhouse ATS'
         elif 'lever.co' in u_low:

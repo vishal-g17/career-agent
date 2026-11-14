@@ -597,6 +597,8 @@ def fill_ats_application(
                 result["ats_type"] = "bamboohr"
             elif "smartrecruiters.com" in dest_url:
                 result["ats_type"] = "smartrecruiters"
+            elif "pyjamahr.com" in dest_url:
+                result["ats_type"] = "pyjamahr"
             print(f"[ATSFiller] Detected ATS Platform: {result['ats_type']}")
 
             cookie_btn = page.locator(
@@ -624,6 +626,14 @@ def fill_ats_application(
                     if app_btn.is_visible(timeout=2000):
                         app_btn.click()
                         page.wait_for_timeout(2500)
+                except Exception:
+                    pass
+            elif result["ats_type"] == "pyjamahr" and page.locator('input#resumeInput, input[name="first_name"]').count() == 0:
+                pj_apply = page.locator('button:has-text("Apply"), a:has-text("Apply")').first
+                try:
+                    if pj_apply.is_visible(timeout=2500):
+                        pj_apply.click()
+                        page.wait_for_timeout(2800)
                 except Exception:
                     pass
             elif page.locator('input[type="email"], input#email, input[type="file"], input[name="name"]').count() == 0:
@@ -729,9 +739,103 @@ def fill_ats_application(
                             chosen_fi.set_input_files(pdf_path)
                             result["resume_uploaded"] = True
                             print(f"[ATSFiller] Resume uploaded successfully: {pdf_path}")
-                            page.wait_for_timeout(3000)
+                            page.wait_for_timeout(7500 if result["ats_type"] == "pyjamahr" else 3000)
                         except Exception as e:
                             print(f"[ATSFiller] File upload attempt error: {e}")
+
+                # 1b. PYJAMAHR DEDICATED FIELD & RESUME-PARSER CLEANUP HANDLER
+                if result["ats_type"] == "pyjamahr":
+                    try:
+                        # Scrub forbidden employer names in work_company_N inputs & delete incomplete rows (empty Start/End)
+                        bad_work_indices = page.evaluate(
+                            """() => {
+                                const setNativeVal = (el, val) => {
+                                    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                                    setter.call(el, val);
+                                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                                };
+                                const compInputs = Array.from(document.querySelectorAll('input[name^="work_company_"]:not([name*="designation"])'));
+                                const workStartDates = Array.from(document.querySelectorAll('input.start-date'));
+                                const workEndDates = Array.from(document.querySelectorAll('input.end-date'));
+                                const bad = [];
+                                for (let idx = compInputs.length - 1; idx >= 0; idx--) {
+                                    const ci = compInputs[idx];
+                                    const v = (ci.value || '').toLowerCase();
+                                    if (v.includes('magicpin')) setNativeVal(ci, 'Quick-Commerce Platform');
+                                    else if (v.includes('lifelong')) setNativeVal(ci, 'Consumer D2C Brand');
+                                    else if (v === 'nom' || v.includes('nom ')) setNativeVal(ci, 'Early-Stage Tech Venture');
+
+                                    if (idx > 0 && idx < workStartDates.length) {
+                                        const sd = workStartDates[idx];
+                                        const ed = workEndDates[idx];
+                                        const startEmpty = sd && !(sd.value || '').trim();
+                                        const endEmpty = ed && !(ed.value || '').trim() && ed.placeholder !== 'Present';
+                                        if (startEmpty || endEmpty) {
+                                            bad.push(idx);
+                                        }
+                                    }
+                                }
+                                return bad;
+                            }"""
+                        )
+                        del_btns = page.locator("button:has(i.flaticon-delete)")
+                        for b_idx in bad_work_indices or []:
+                            try:
+                                target_del = del_btns.nth(b_idx)
+                                if target_del.count() > 0 and target_del.is_visible():
+                                    target_del.scroll_into_view_if_needed(timeout=1500)
+                                    target_del.click(force=True)
+                                    page.wait_for_timeout(800)
+                            except Exception:
+                                pass
+
+                        # Helper for PyjamaHR react-select / list__input dropdowns (async options supported)
+                        def _fill_pyjamahr_select(input_sel: str, queries: List[str], field_tag: str, wait_ms: int = 1600) -> None:
+                            loc = page.locator(input_sel).first
+                            if loc.count() > 0 and loc.is_visible():
+                                loc.scroll_into_view_if_needed(timeout=2000)
+                                for q_txt in queries:
+                                    loc.click(force=True)
+                                    page.wait_for_timeout(200)
+                                    loc.fill("")
+                                    loc.press_sequentially(q_txt, delay=45)
+                                    page.wait_for_timeout(wait_ms)
+                                    opts = [
+                                        o for o in page.locator('[id*="react-select"][id*="-option-"], [class*="menu"] [class*="option"], [role="option"]').all()
+                                        if o.is_visible() and "no options" not in (o.inner_text() or "").lower()
+                                    ]
+                                    if opts:
+                                        picked_txt = (opts[0].inner_text() or "").strip()
+                                        opts[0].click(timeout=2000)
+                                        page.wait_for_timeout(250)
+                                        result["fields_filled"].append({"field": field_tag, "value": picked_txt[:40]})
+                                        return
+                                page.keyboard.press("Enter")
+                                page.wait_for_timeout(250)
+
+                        _fill_pyjamahr_select("input#react-select-2-input", ["New Delhi", "Delhi", "Bangalore"], "pyjamahr_city", wait_ms=2000)
+                        _fill_pyjamahr_select("input#total_work_experience_years", ["1"], "pyjamahr_exp_years", wait_ms=800)
+                        _fill_pyjamahr_select("input#total_work_experience_months", ["2"], "pyjamahr_exp_months", wait_ms=800)
+
+                        for pj_name, pj_val in (
+                            ("Current_CTC_in_lakhs", "1000000"),
+                            ("Expected_CTC_in_lakhs", "1500000"),
+                            ("notice_period", "15"),
+                        ):
+                            pj_inp = page.locator(f'input[name="{pj_name}"]').first
+                            if pj_inp.count() > 0 and pj_inp.is_visible() and not (pj_inp.input_value() or "").strip():
+                                pj_inp.scroll_into_view_if_needed(timeout=1500)
+                                pj_inp.fill(pj_val)
+                                result["fields_filled"].append({"field": pj_name, "value": pj_val})
+
+                        # Ensure bottom resumeInput2 also has resume if empty (leave Yes/No toggle to Step 5b so it is clicked ONCE, not toggled off!)
+                        r2 = page.locator("input#resumeInput2").first
+                        if r2.count() > 0 and not (r2.input_value() or "").strip():
+                            r2.set_input_files(pdf_path)
+                            page.wait_for_timeout(1200)
+                    except Exception as pje:
+                        print(f"[ATSFiller] PyjamaHR field handler notice: {pje}")
 
                 # 2. HANDLE REACT-SELECT COMBOBOXES FIRST (Greenhouse input[role="combobox"])
                 comboboxes = page.locator('input[role="combobox"]').all()

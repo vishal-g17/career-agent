@@ -861,6 +861,24 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
         except Exception as nke:
             print(f"[InterBatch:Naukri] Note: {nke}")
 
+    # 4b. Stage E -> Local Indeed Discovery + SmartApply (via Ridealong, synced to Cloud DB)
+    if sync_control_with_cloud().get("linkedin_enabled", True) and is_in_active_window():
+        print("[InterBatch:Indeed] Stage E -> Discovering & auto-applying to fresh Indeed Easily-Apply openings...")
+        sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage E -> Indeed SmartApply", force=True)
+        send_discord_cycle_note(
+            "💼 **Stage E — Indeed Fresh Discovery & SmartApply**\n"
+            "• Scraping fresh APM / Product / Business / Data Analyst Easily-Apply listings on Indeed and submitting verified SmartApply applications."
+        )
+        try:
+            in_py = (
+                f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
+                "from scripts.run_indeed_batch import run_indeed_batch; "
+                "run_indeed_batch(limit=8)"
+            )
+            subprocess.run([sys.executable, "-u", "-c", in_py], timeout=420)
+        except Exception as ine:
+            print(f"[InterBatch:Indeed] Note: {ine}")
+
     # 5. Acceptance check + Pre-Batch Random Cool-Down
     try:
         new_accepts = check_and_message_accepted_connections(page, conn)
@@ -963,20 +981,22 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 ctl_state = sync_control_with_cloud()
                 if not ctl_state.get("linkedin_enabled", True):
                     if not paused_logged:
-                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Naukri continues independently during 10 AM - 11 PM IST!")
+                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Naukri + Indeed continue independently during 10 AM - 11 PM IST!")
                         paused_logged = True
-                    # Keep Naukri running every ~30m during 10 AM - 11 PM IST even while LinkedIn is paused/logged out (unless manual emergency_stop)
+                    # Keep Naukri + Indeed running every ~30m during 10 AM - 11 PM IST even while LinkedIn is paused/logged out (unless manual emergency_stop)
                     if is_in_active_window() and ctl_state.get("reason") != "emergency_stop" and (time.time() - last_naukri_standalone_ts) >= 1800.0:
                         last_naukri_standalone_ts = time.time()
                         try:
                             nk_py = (
                                 f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
                                 "from scripts.run_naukri_batch import run_naukri_batch; "
-                                "run_naukri_batch(limit=10)"
+                                "from scripts.run_indeed_batch import run_indeed_batch; "
+                                "run_naukri_batch(limit=10); "
+                                "run_indeed_batch(limit=8)"
                             )
-                            subprocess.run([sys.executable, "-u", "-c", nk_py], timeout=420)
+                            subprocess.run([sys.executable, "-u", "-c", nk_py], timeout=600)
                         except Exception as snke:
-                            print(f"[Cycle:NaukriStandalone] Note: {snke}")
+                            print(f"[Cycle:NaukriIndeedStandalone] Note: {snke}")
                     time.sleep(10)
                     continue
                 if paused_logged:
