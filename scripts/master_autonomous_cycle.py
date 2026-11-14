@@ -878,6 +878,35 @@ def is_in_active_window() -> bool:
         return False
     return 10 <= now_ist.hour < 23
 
+def _sync_linkedin_outreach_to_cloud(conn) -> None:
+    """Pushes latest Mac linkedin_connections_outreach rows to Cloud VM DB so Live Dashboard stays accurate."""
+    ssh_key = os.path.expanduser("~/Downloads/agent-vm-key.key")
+    if sys.platform != "darwin" or not os.path.exists(ssh_key):
+        return
+    try:
+        import base64, json
+        rows = conn.execute(
+            "SELECT id, name, headline, status, exclusion_reason, sent_at, followup_sent_at "
+            "FROM linkedin_connections_outreach ORDER BY sent_at DESC LIMIT 30"
+        ).fetchall()
+        if not rows:
+            return
+        b64 = base64.b64encode(json.dumps(rows).encode("utf-8")).decode("ascii")
+        remote_py = (
+            f"import base64,json,sqlite3; rows=json.loads(base64.b64decode('{b64}').decode()); "
+            "c=sqlite3.connect('/home/opc/.linkedin_agent.db',timeout=15.0); "
+            "c.executemany('INSERT OR REPLACE INTO linkedin_connections_outreach "
+            "(id,name,headline,status,exclusion_reason,sent_at,followup_sent_at) VALUES (?,?,?,?,?,?,?)', rows); "
+            "c.commit(); c.close()"
+        )
+        subprocess.run(
+            ["ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=4", "opc@130.210.108.55", "/home/opc/career-agent/venv/bin/python3 -"],
+            input=remote_py, text=True, capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False):
     init_master_db()
     conn = sqlite3.connect(DB_PATH)
@@ -1000,6 +1029,7 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                             conn.commit()
                             messages_sent_session += 1
                             batch_msg_count += 1
+                            _sync_linkedin_outreach_to_cloud(conn)
 
                             if messages_sent_session == 1 or batch_msg_count in (1, batch_target):
                                 send_discord_cycle_note(

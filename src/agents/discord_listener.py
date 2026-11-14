@@ -152,6 +152,15 @@ class DiscordListener:
                 f"• Cold Email Follow-Ups (`+3d / +7d`): "
                 f"{'🟢 ENABLED' if fu_en else '⏸️ PAUSED (waiting for your start trigger)'}"
             )
+            from src.services.linkedin_control import read_local_control
+            ctl = read_local_control()
+            li_en = ctl.get("linkedin_enabled", True)
+            li_stage = ctl.get("stage", "idle")
+            li_hb = ctl.get("last_mac_heartbeat", "n/a")
+            lines.append(
+                f"\n**LinkedIn Loop (Local Mac Only — `10 AM – 11 PM IST`, Zero Cloud Dependency):**\n"
+                f"• State: {'🟢 ENABLED' if li_en else '🛑 STOPPED'} (`{li_stage}` | last heartbeat: `{li_hb}`)"
+            )
         except Exception:
             pass
 

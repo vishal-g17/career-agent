@@ -398,55 +398,6 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
         browser = p.chromium.connect_over_cdp(cdp_ep, timeout=12000)
         page, context = _acquire_cdp_page(browser, port)
         try:
-            # Phase 0: Drain unattempted direct Greenhouse / Lever / Ashby jobs via Persistent Chrome CDP!
-            from src.services.ats_filler import fill_ats_application
-            from src.agents.discord_notifier import DiscordNotifier
-            ats_queued = cur.execute(
-                """
-                SELECT id, title, company, url
-                FROM jobs
-                WHERE status IN ('new', 'redirect_pending', 'external_pending_review')
-                  AND (url LIKE '%greenhouse.io%' OR url LIKE '%lever.co%' OR url LIKE '%ashbyhq.com%')
-                  AND COALESCE(scorecard, '') NOT LIKE '%human_verification%'
-                  AND COALESCE(scorecard, '') NOT LIKE '%captcha_gate%'
-                  AND COALESCE(scorecard, '') NOT LIKE '%cdp_attempted%'
-                ORDER BY COALESCE(match_score, 85) DESC, created_at DESC
-                LIMIT 6
-                """
-            ).fetchall()
-            for jid, title, comp, aurl in ats_queued:
-                if time.time() >= end_time or applied_count >= max_apps:
-                    break
-                res = fill_ats_application(aurl, role_title=f"{title} @ {comp}", auto_submit=True, existing_page=page, leave_open=True)
-                if res.get("submitted") and res.get("confirmed"):
-                    conn.execute(
-                        "UPDATE jobs SET status='applied', scorecard=json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'persistent_cdp') WHERE id=?",
-                        (jid,),
-                    )
-                    conn.commit()
-                    applied_count += 1
-                    try:
-                        DiscordNotifier().send_application_alert({
-                            "company": comp,
-                            "role": title,
-                            "platform": f"Persistent Chrome CDP ({res.get('ats_type', 'ATS').upper()})",
-                            "url": res.get("ats_url") or aurl,
-                            "status": "SUBMITTED & CONFIRMED",
-                            "details": f"Filled {len(res.get('fields_filled', []))} fields + uploaded Vishal_Gupta_Resume.pdf via Ridealong CDP!",
-                            "resume": "Vishal_Gupta_Resume.pdf",
-                        })
-                    except Exception:
-                        pass
-                elif res.get("error") == "expired":
-                    conn.execute("UPDATE jobs SET status='expired' WHERE id=?", (jid,))
-                    conn.commit()
-                else:
-                    conn.execute(
-                        "UPDATE jobs SET status='external_pending_review', scorecard=json_set(COALESCE(scorecard, '{}'), '$.last_error', ?, '$.cdp_attempted', 1) WHERE id=?",
-                        (str(res.get("error") or "unconfirmed")[:100], jid),
-                    )
-                    conn.commit()
-
             # Phase 1: Drain queued 'new' LinkedIn jobs from Dashboard DB first!
             queued = cur.execute(
                 """
