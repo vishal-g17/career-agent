@@ -38,10 +38,48 @@ def run_priority_email(args) -> str:
     from src.services.exclusion_filter import FORBIDDEN_COMPANIES
 
     recip = args.to.strip()
-    if not args.body and any(fc in f"{recip} {args.company}".lower() for fc in FORBIDDEN_COMPANIES):
-        return f"🛑 Blocked: `{recip}` matches restricted company exclusion rule."
+    check_blob = f"{recip} {args.company or ''} {args.subject or ''} {args.body or ''}".lower()
+    if any(fc in check_blob for fc in FORBIDDEN_COMPANIES):
+        return f"🛑 Blocked: `{recip}` or message content matches restricted company exclusion rule."
+
+    def _record_outreach_lead(used_sender: str) -> None:
+        if recip.lower() in {"vishal90301@gmail.com", "vishal.gupta.ug22@nsut.ac.in"}:
+            return
+        conn = sqlite3.connect(DB_PATH, timeout=15.0)
+        conn.execute(
+            """
+            INSERT INTO outreach_leads (name, email, company, role_target, status, first_sent_at, last_sent_at, sender_email)
+            VALUES (?, ?, ?, ?, 'sent', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                name=CASE WHEN excluded.name != 'Hiring Team' THEN excluded.name ELSE outreach_leads.name END,
+                company=CASE WHEN excluded.company != '' THEN excluded.company ELSE outreach_leads.company END,
+                role_target=CASE WHEN excluded.role_target != '' THEN excluded.role_target ELSE outreach_leads.role_target END,
+                status='sent',
+                last_sent_at=CURRENT_TIMESTAMP,
+                sender_email=excluded.sender_email
+            """,
+            (
+                args.name or "Hiring Team",
+                recip.lower(),
+                args.company or "",
+                args.role or "Product / Analytics",
+                used_sender,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        try:
+            from scripts.sync_leads_to_sheet import export_split_leads
+            export_split_leads()
+        except Exception:
+            pass
 
     if args.body:
+        from src.services.email_verifier import verify_email
+        is_valid, reason, _ = verify_email(recip)
+        if not is_valid:
+            return f"❌ Immediate email to `{recip}` blocked by MX/bounce verifier: `{reason}`"
+
         sender, app_pwd = get_sender_credentials(args.sender or None)
         subj = args.subject or "Quick note from Vishal Gupta"
         msg = MIMEMultipart()
@@ -55,17 +93,25 @@ def run_priority_email(args) -> str:
                 part = MIMEApplication(pdf_p.read_bytes(), Name="Vishal_Gupta_Resume.pdf")
                 part["Content-Disposition"] = 'attachment; filename="Vishal_Gupta_Resume.pdf"'
                 msg.attach(part)
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=25) as srv:
-            srv.ehlo()
-            srv.starttls()
-            srv.ehlo()
-            srv.login(sender, app_pwd)
-            srv.sendmail(sender, [recip], msg.as_string())
+        try:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=25) as srv:
+                srv.ehlo()
+                srv.starttls()
+                srv.ehlo()
+                srv.login(sender, app_pwd)
+                srv.sendmail(sender, [recip], msg.as_string())
+        except Exception:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=25) as srv:
+                srv.login(sender, app_pwd)
+                srv.sendmail(sender, [recip], msg.as_string())
+        if not args.no_cv or args.company or args.role:
+            _record_outreach_lead(sender)
         return (
-            f"✅ **Priority Email Sent Immediately!**\n"
-            f"• **To:** `{recip}` (from `{sender}`)\n"
+            f"✅ **Priority Cold Email + CV Sent Immediately!**\n"
+            f"• **To:** `{recip}` (`{args.company or 'Direct'}`)\n"
+            f"• **Sender:** `{sender}`\n"
             f"• **Subject:** `{subj}`\n"
-            f"• **CV Attached:** `{'No' if args.no_cv else 'Yes'}`"
+            f"• **CV Attached:** `{'No' if args.no_cv else 'Yes (Vishal_Gupta_Resume.pdf)'}`"
         )
     else:
         draft = compose_cold_email(
@@ -79,20 +125,7 @@ def run_priority_email(args) -> str:
         if not ok:
             return f"❌ Immediate email to `{recip}` could not be sent (failed MX/SMTP check)."
 
-        conn = sqlite3.connect(DB_PATH, timeout=15.0)
-        conn.execute(
-            """
-            INSERT INTO outreach_leads (name, email, company, role_target, status, first_sent_at, last_sent_at, sender_email)
-            VALUES (?, ?, ?, ?, 'sent', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
-            ON CONFLICT(email) DO UPDATE SET
-                status='sent',
-                last_sent_at=CURRENT_TIMESTAMP,
-                sender_email=excluded.sender_email
-            """,
-            (args.name or "Hiring Team", recip.lower(), args.company or "", args.role or "Product / Analytics", draft["sender"]),
-        )
-        conn.commit()
-        conn.close()
+        _record_outreach_lead(draft["sender"])
         return (
             f"✅ **Priority Cold Email + CV Sent Immediately!**\n"
             f"• **To:** `{recip}` (`{args.company or 'Direct'}`)\n"
