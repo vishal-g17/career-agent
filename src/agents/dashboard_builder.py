@@ -108,6 +108,30 @@ def build_dashboard_html() -> str:
 
     conn.close()
 
+    # Compute Today's Live Breakdown (IST)
+    today_summary_html = ""
+    try:
+        from src.services.daily_report import collect_daily_metrics
+        dm = collect_daily_metrics()
+        tp = dm["today_by_plat"]
+        em = dm["emails"]
+        li = dm["linkedin"]
+        today_summary_html = f"""
+        <div class="card" style="margin-bottom: 1.5rem; border-left: 4px solid #38bdf8; background: #0f172a;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; margin-bottom:0.6rem;">
+                <h3 style="font-size:1.02rem; color:#f0f6fc;">📅 Today's Full-Day Activity ({dm['date_ist']} IST)</h3>
+                <span style="font-size:0.78rem; color:#94a3b8;">Updated: {dm['generated_at_ist']}</span>
+            </div>
+            <div style="display:flex; flex-wrap:wrap; gap:1.2rem; font-size:0.88rem; color:#cbd5e1;">
+                <div>🎯 <strong>Jobs Today ({dm['jobs_today_total']}):</strong> Instahyre <code>{tp['Instahyre']}</code> &bull; Direct ATS <code>{tp['Direct ATS (Greenhouse/Lever/Ashby)']}</code> &bull; LinkedIn <code>{tp['LinkedIn Jobs']}</code> &bull; Naukri <code>{tp['Naukri']}</code> &bull; Indeed <code>{tp['Indeed']}</code></div>
+                <div>✉️ <strong>Emails Today ({em['sent_today_total']}):</strong> Fresh <code>{em['fresh_today']}</code> (NSUT <code>{em['nsut_today']}</code>, Gmail <code>{em['gmail_today']}</code>) &bull; Follow-Ups <code>{em['fu1_today'] + em['fu2_today']}</code></div>
+                <div>🤝 <strong>LinkedIn DMs Today:</strong> <code>{li['dms_today']}</code></div>
+            </div>
+        </div>
+        """
+    except Exception:
+        today_summary_html = ""
+
     # Build Replies HTML
     reply_cards = ""
     for r in replies:
@@ -142,9 +166,21 @@ def build_dashboard_html() -> str:
         except Exception:
             pass
         applied_via = scorecard.get('applied_via', 'Direct ATS')
-        if 'naukri' in (j['url'] or '').lower():
+        u_low = (j['url'] or '').lower()
+        jid_str = str(j['id'] or '')
+        if 'instahyre.com' in u_low or jid_str.startswith('instahyre_'):
+            applied_via = 'Instahyre Auto-Apply'
+        elif 'linkedin.com' in u_low or applied_via == 'linkedin_easy_apply':
+            applied_via = 'LinkedIn Easy Apply'
+        elif 'naukri' in u_low:
             applied_via = 'Naukri Auto-Apply'
-        elif 'forms.gle' in (j['url'] or '').lower():
+        elif 'greenhouse.io' in u_low or 'gh_jid' in u_low:
+            applied_via = 'Greenhouse ATS'
+        elif 'lever.co' in u_low:
+            applied_via = 'Lever ATS'
+        elif 'ashbyhq.com' in u_low:
+            applied_via = 'Ashby ATS'
+        elif 'forms.gle' in u_low or 'docs.google.com/forms' in u_low:
             applied_via = 'Google Form'
 
         applied_rows += f"""
@@ -389,6 +425,8 @@ tr.table-row:hover {{ background: rgba(56, 189, 248, 0.04); }}
             <div class="kpi-sub">Strict Heuristic Fit (0-100)</div>
         </div>
     </div>
+
+    {today_summary_html}
 
     <!-- CONTROLS & TABS -->
     <div class="controls-bar">

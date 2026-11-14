@@ -593,6 +593,18 @@ class DiscordListener:
             self.client.add_reaction(target_channel, msg_id, "✅")
             return
 
+        # 2a. Fast path: Full-Day / Today Breakdown on demand
+        daily_queries = {
+            "today", "today update", "daily update", "full day update",
+            "daily report", "today report", "today summary", "daily summary", "eod", "eod report",
+        }
+        if clean_q in daily_queries:
+            from src.services.daily_report import format_daily_report_markdown
+            rep = format_daily_report_markdown(base_cloud_url=self.get_live_cloud_base_url())
+            self.send_chunked(target_channel, rep)
+            self.client.add_reaction(target_channel, msg_id, "✅")
+            return
+
         # 2b. Fast path: Cloud-Synced LinkedIn Stop / Start Control (0 LLM tokens)
         if any(p in lower for p in ["stop linkedin", "pause linkedin", "halt linkedin", "linkedin stop", "disable linkedin"]):
             from src.services.linkedin_control import set_linkedin_enabled
@@ -662,6 +674,35 @@ class DiscordListener:
             self.send_chunked(target_channel, response_text)
             self.client.add_reaction(target_channel, msg_id, "✅")
 
+    def _maybe_send_nightly_daily_report(self) -> None:
+        """Automatically posts the Full-Day Career Autopilot Update once every night at 11:00 PM IST."""
+        try:
+            import datetime as _dt
+            ist = _dt.timezone(_dt.timedelta(hours=5, minutes=30))
+            now_ist = _dt.datetime.now(ist)
+            if now_ist.hour != 23:
+                return
+            today_str = now_ist.strftime("%Y-%m-%d")
+            marker = PROJECT_ROOT / "data" / "last_daily_report_date.txt"
+            if marker.exists() and marker.read_text(encoding="utf-8").strip() == today_str:
+                return
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(today_str + "\n", encoding="utf-8")
+
+            from src.services.daily_report import format_daily_report_markdown
+            report_md = format_daily_report_markdown(
+                base_cloud_url=self.get_live_cloud_base_url(),
+                header_prefix="🌙 **End-of-Day Full Career Autopilot Summary (11:00 PM IST)**",
+            )
+            for ch in self.watch_channels:
+                try:
+                    self.send_chunked(ch, report_md)
+                except Exception as ce:
+                    print(f"[DiscordListener] Daily report send notice ({ch}): {ce}")
+            print(f"[DiscordListener] Posted 11:00 PM IST Daily Report for {today_str}!")
+        except Exception as e:
+            print(f"[DiscordListener] Nightly report check notice: {e}")
+
     def start_polling(self, interval_seconds: int = 3) -> None:
         """Polls Discord channels (#prompt and #jobs) for new incoming user commands."""
         print(f"[DiscordListener] Active on channels {self.watch_channels}. Polling every {interval_seconds}s...")
@@ -678,6 +719,7 @@ class DiscordListener:
 
         while True:
             try:
+                self._maybe_send_nightly_daily_report()
                 for ch in self.watch_channels:
                     messages = self.client.get_channel_messages(ch, limit=10)
                     for msg in reversed(messages):
