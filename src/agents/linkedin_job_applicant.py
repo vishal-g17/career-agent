@@ -289,24 +289,25 @@ def _pull_fresh_jobs_from_cloud_vm(conn) -> None:
         return
     try:
         import json, subprocess
-        remote_py = (
-            "import json, sqlite3; "
-            "c = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=15.0).cursor(); "
-            "rows = c.execute(\"\"\""
-            "SELECT id, title, company, COALESCE(location, 'India'), url, COALESCE(match_score, 85), status, COALESCE(scorecard, '{}') "
-            "FROM jobs "
-            "WHERE (status = 'new' AND url LIKE '%linkedin.com/jobs/view/%') "
-            "   OR (status IN ('new', 'external_pending_review') "
-            "       AND (url LIKE '%greenhouse.io%' OR url LIKE '%lever.co%' OR url LIKE '%ashbyhq.com%') "
-            "       AND COALESCE(scorecard, '') NOT LIKE '%cdp_attempted%' "
-            "       AND COALESCE(scorecard, '') NOT LIKE '%human_verification%' "
-            "       AND COALESCE(scorecard, '') NOT LIKE '%captcha_gate%') "
-            "ORDER BY COALESCE(match_score, 85) DESC, created_at DESC LIMIT 60"
-            "\"\"\").fetchall(); "
-            "print(json.dumps(rows))"
-        )
+        remote_py = """
+import json, sqlite3
+c = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=15.0).cursor()
+rows = c.execute('''
+SELECT id, title, company, COALESCE(location, 'India'), url, COALESCE(match_score, 85), status, COALESCE(scorecard, '{}')
+FROM jobs
+WHERE (status = 'new' AND url LIKE '%linkedin.com/jobs/view/%')
+   OR (status IN ('new', 'external_pending_review')
+       AND (url LIKE '%greenhouse.io%' OR url LIKE '%lever.co%' OR url LIKE '%ashbyhq.com%')
+       AND COALESCE(scorecard, '') NOT LIKE '%cdp_attempted%'
+       AND COALESCE(scorecard, '') NOT LIKE '%human_verification%'
+       AND COALESCE(scorecard, '') NOT LIKE '%captcha_gate%')
+ORDER BY COALESCE(match_score, 85) DESC, created_at DESC LIMIT 60
+''').fetchall()
+print(json.dumps(rows))
+"""
         proc = subprocess.run(
-            ["ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "opc@130.210.108.55", f"/home/opc/career-agent/venv/bin/python3 -c \"{remote_py}\""],
+            ["ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "opc@130.210.108.55", "/home/opc/career-agent/venv/bin/python3 -"],
+            input=remote_py,
             capture_output=True,
             text=True,
             timeout=15,
@@ -343,17 +344,21 @@ def _sync_job_statuses_to_cloud_vm(conn) -> None:
         if not rows:
             return
         b64 = base64.b64encode(json.dumps(rows).encode("utf-8")).decode("ascii")
-        remote_py = (
-            "import base64, json, sqlite3; "
-            f"rows = json.loads(base64.b64decode('{b64}').decode()); "
-            "conn = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=20.0); "
-            "c = conn.cursor(); "
-            "[c.execute(\"UPDATE jobs SET status=?, scorecard=? WHERE url=? OR id=?\", (r[6], r[7], r[4], r[0])) for r in rows]; "
-            "[c.execute(\"INSERT OR IGNORE INTO jobs (id, title, company, location, url, match_score, status, scorecard) VALUES (?,?,?,?,?,?,?,?)\", r) for r in rows if r[6] == 'applied']; "
-            "conn.commit(); conn.close()"
-        )
+        remote_py = f"""
+import base64, json, sqlite3
+rows = json.loads(base64.b64decode('{b64}').decode())
+conn = sqlite3.connect('/home/opc/.linkedin_agent.db', timeout=20.0)
+c = conn.cursor()
+for r in rows:
+    c.execute("UPDATE jobs SET status=?, scorecard=? WHERE url=? OR id=?", (r[6], r[7], r[4], r[0]))
+    if r[6] == 'applied':
+        c.execute("INSERT OR IGNORE INTO jobs (id, title, company, location, url, match_score, status, scorecard) VALUES (?,?,?,?,?,?,?,?)", r)
+conn.commit()
+conn.close()
+"""
         subprocess.run(
-            ["ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "opc@130.210.108.55", f"/home/opc/career-agent/venv/bin/python3 -c \"{remote_py}\""],
+            ["ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=5", "opc@130.210.108.55", "/home/opc/career-agent/venv/bin/python3 -"],
+            input=remote_py,
             capture_output=True,
             text=True,
             timeout=15,
