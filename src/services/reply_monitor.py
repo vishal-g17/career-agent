@@ -323,14 +323,26 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
 
         notifier = DiscordNotifier()
         message_ids = msg_nums[0].split()
+        target_ids = message_ids[-250:]
+        if not target_ids:
+            mail.logout()
+            return []
 
-        for m_id in reversed(message_ids[-250:]):
-            res, data = mail.fetch(m_id, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
-            if res != "OK" or not data or not data[0]:
-                continue
+        res, batch_data = mail.fetch(b",".join(target_ids), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+        if res != "OK" or not batch_data:
+            mail.logout()
+            return []
 
-            raw_header = data[0][1] if len(data[0]) > 1 else data[0]
-            msg = email.message_from_bytes(raw_header) if isinstance(raw_header, bytes) else email.message_from_string(str(raw_header))
+        header_items = []
+        for item in batch_data:
+            if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], bytes):
+                meta = item[0].decode("utf-8", errors="ignore") if isinstance(item[0], bytes) else str(item[0])
+                seq_m = re.match(r"^\s*(\d+)", meta)
+                if seq_m:
+                    header_items.append((seq_m.group(1).encode("ascii"), item[1]))
+
+        for m_id, raw_header in reversed(header_items):
+            msg = email.message_from_bytes(raw_header)
 
             from_header = _decode_str(msg.get("From", ""))
             subject = _decode_str(msg.get("Subject", ""))
