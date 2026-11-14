@@ -99,7 +99,7 @@ def _call_gemini(model: str, prompt: str, system_instruction: Optional[str], tem
     return None
 
 
-def generate_text(prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.7) -> str:
+def generate_text(prompt: str, system_instruction: Optional[str] = None, temperature: float = 0.7, max_tokens: int = 2048) -> str:
     """
     Calls LLMs with cascading fallback:
       1. Claude Opus 4.6 (if ANTHROPIC_API_KEY set)

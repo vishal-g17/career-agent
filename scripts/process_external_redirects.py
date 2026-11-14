@@ -1,3 +1,4 @@
+import fcntl
 import os
 import sqlite3
 import sys
@@ -86,6 +87,26 @@ def process_redirects(max_jobs: int = 20):
         "--disable-dev-shm-usage",
         "--disable-blink-features=AutomationControlled",
     ]
+    if sys.platform != "darwin":
+        launch_args.extend(
+            [
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--renderer-process-limit=1",
+                "--js-flags=--max-old-space-size=192",
+                "--blink-settings=imagesEnabled=false",
+            ]
+        )
+
+    lock_fh = None
+    if sys.platform != "darwin":
+        try:
+            lock_fh = open("/tmp/cloud_chromium.lock", "w")
+            fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        except Exception:
+            pass
 
     with sync_playwright() as p_play:
         try:
@@ -142,12 +163,29 @@ def process_redirects(max_jobs: int = 20):
                         skipped_count += 1
                     else:
                         skipped_count += 1
-                        cur.execute("UPDATE jobs SET status = 'external_pending_review' WHERE id = ?", (jid,))
+                        err_val = str(res.get("error") or "unconfirmed")[:140]
+                        cur.execute(
+                            """
+                            UPDATE jobs
+                            SET status = 'external_pending_review',
+                                scorecard = json_set(COALESCE(scorecard, '{}'), '$.last_error', ?)
+                            WHERE id = ?
+                            """,
+                            (err_val, jid),
+                        )
                         conn.commit()
-                        print(f"[ATSProcessor] -> Skipped ({res.get('error')})")
+                        print(f"[ATSProcessor] -> Skipped ({err_val})")
                 except Exception as e:
                     skipped_count += 1
-                    cur.execute("UPDATE jobs SET status = 'external_pending_review' WHERE id = ?", (jid,))
+                    cur.execute(
+                        """
+                        UPDATE jobs
+                        SET status = 'external_pending_review',
+                            scorecard = json_set(COALESCE(scorecard, '{}'), '$.last_error', ?)
+                        WHERE id = ?
+                        """,
+                        (str(e)[:140], jid),
+                    )
                     conn.commit()
                     print(f"[ATSProcessor] Error on {title}: {e}")
 
@@ -157,6 +195,12 @@ def process_redirects(max_jobs: int = 20):
                 browser.close()
             except Exception:
                 pass
+            if lock_fh is not None:
+                try:
+                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                    lock_fh.close()
+                except Exception:
+                    pass
 
     conn.close()
     print("\n=======================================================")

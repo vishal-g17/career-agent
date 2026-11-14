@@ -1,12 +1,10 @@
-import email as _email_pkg
-import imaplib
+import fcntl
 import json
 import os
 import re
+import sys
 import time
 import urllib.parse as _up
-from email.header import decode_header
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +12,7 @@ from playwright.sync_api import sync_playwright
 
 from .. import config  # loads .env natively
 from ..db import database
+from ..engine.llm import generate_text
 from .form_answerer import (
     answer_open_ended_question,
     answer_standard_field,
@@ -34,24 +33,29 @@ def _load_local_env() -> None:
 _load_local_env()
 
 
-def _has_interactive_captcha(page) -> bool:
-    """
-    Detects active, interactive anti-bot / CAPTCHA challenges while ignoring
-    passive invisible score badges (e.g. reCAPTCHA Enterprise size=invisible
-    footer badge or hidden hCaptcha #frame=enclave telemetry frame).
-    Strictly follows safety guidelines: never interacts with or bypasses CAPTCHAs.
-    """
+def _frame_has_captcha(frame) -> bool:
     try:
         return bool(
-            page.evaluate(
+            frame.evaluate(
                 """() => {
                     const bodyText = (document.body && document.body.innerText || '').toLowerCase();
                     if (
                         bodyText.includes('verify you are human') ||
+                        bodyText.includes("confirm you're a human") ||
+                        bodyText.includes('confirm you are a human') ||
                         bodyText.includes('checking if the site connection is secure') ||
                         document.querySelector('#challenge-running, #cf-challenge-running')
                     ) {
                         return true;
+                    }
+                    // Visible text/image CAPTCHA inputs (e.g. Keka Careers image captcha)
+                    const capInputs = Array.from(document.querySelectorAll('input#captcha, input[name*="captcha" i], input[placeholder*="captcha" i]'));
+                    for (const ci of capInputs) {
+                        const r = ci.getBoundingClientRect();
+                        const st = window.getComputedStyle(ci);
+                        if (st.display !== 'none' && st.visibility !== 'hidden' && r.width > 20 && r.height > 12) {
+                            return true;
+                        }
                     }
                     const iframes = Array.from(document.querySelectorAll('iframe'));
                     for (const f of iframes) {
@@ -68,7 +72,6 @@ def _has_interactive_captcha(page) -> bool:
                         );
                         if (!visible) continue;
 
-                        // Cloudflare Turnstile / Challenge or DataDome
                         if (
                             src.includes('challenges.cloudflare.com') ||
                             src.includes('turnstile') ||
@@ -76,7 +79,6 @@ def _has_interactive_captcha(page) -> bool:
                         ) {
                             return true;
                         }
-                        // Google reCAPTCHA: ignore passive size=invisible badge unless bframe challenge popup is open
                         if (src.includes('recaptcha')) {
                             if (src.includes('bframe') && rect.width > 150 && rect.height > 150) {
                                 return true;
@@ -85,12 +87,11 @@ def _has_interactive_captcha(page) -> bool:
                                 return true;
                             }
                         }
-                        // hCaptcha: ignore passive #frame=enclave unless checkbox or challenge popup is visible
                         if (src.includes('hcaptcha')) {
                             if (src.includes('frame=challenge') && rect.width > 150 && rect.height > 150) {
                                 return true;
                             }
-                            if (src.includes('frame=checkbox') && rect.width > 100 && rect.height > 45) {
+                            if (src.includes('frame=checkbox') && !src.includes('invisible') && rect.width > 100 && rect.height > 45) {
                                 return true;
                             }
                         }
@@ -103,88 +104,38 @@ def _has_interactive_captcha(page) -> bool:
         return False
 
 
-def _fetch_greenhouse_email_code(min_epoch: float, timeout_sec: int = 28) -> Optional[str]:
+def _has_interactive_captcha(page) -> bool:
     """
-    Reads the candidate's own Gmail inbox (vishal90301@gmail.com) via IMAP to
-    retrieve Greenhouse's 8-character candidate email ownership verification code.
+    Detects active, interactive anti-bot / CAPTCHA / human-verification challenges
+    across main page and embedded ATS iframes (e.g. iCIMS / Keka / Greenhouse),
+    while ignoring passive invisible score badges.
+    Strictly follows safety guidelines: never interacts with or bypasses CAPTCHAs.
     """
-    gmail_addr = (os.environ.get("GMAIL_ADDRESS") or "").strip()
-    gmail_pass = (os.environ.get("GMAIL_APP_PASSWORD") or "").strip()
-    if not gmail_addr or not gmail_pass:
-        return None
-
-    deadline = time.time() + timeout_sec
-    while time.time() < deadline:
-        time.sleep(4.0)
-        try:
-            mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
-            mail.login(gmail_addr, gmail_pass)
-            mail.select("INBOX")
-            status, data = mail.search(None, '(FROM "greenhouse")')
-            if status == "OK" and data and data[0]:
-                msg_ids = data[0].split()[-6:]
-                for mid in reversed(msg_ids):
-                    st, msg_data = mail.fetch(mid, "(RFC822)")
-                    if st != "OK" or not msg_data or not msg_data[0]:
-                        continue
-                    msg = _email_pkg.message_from_bytes(msg_data[0][1])
-                    date_hdr = msg.get("Date")
-                    if date_hdr:
-                        try:
-                            msg_ts = parsedate_to_datetime(date_hdr).timestamp()
-                            if msg_ts < min_epoch:
-                                continue
-                        except Exception:
-                            pass
-
-                    subj_parts = decode_header(msg.get("Subject") or "")
-                    subj = "".join(
-                        (p.decode(enc or "utf-8", errors="ignore") if isinstance(p, bytes) else str(p))
-                        for p, enc in subj_parts
-                    )
-
-                    body_txt = ""
-                    if msg.is_multipart():
-                        for part in msg.walk():
-                            ctype = part.get_content_type()
-                            if ctype in ("text/plain", "text/html"):
-                                payload = part.get_payload(decode=True)
-                                if payload:
-                                    body_txt += "\n" + payload.decode("utf-8", errors="ignore")
-                    else:
-                        payload = msg.get_payload(decode=True)
-                        if payload:
-                            body_txt = payload.decode("utf-8", errors="ignore")
-
-                    clean_txt = re.sub(r"<[^>]+>", " ", f"{subj}\n{body_txt}")
-                    clean_txt = re.sub(r"\s+", " ", clean_txt)
-
-                    # Match Greenhouse 8-char code right after 'paste this code' / 'security code' / 'application:'
-                    m = re.search(
-                        r"(?:paste this code|security code|verification code)[^A-Za-z0-9]{1,80}\b([A-Za-z0-9]{8})\b",
-                        clean_txt,
-                        re.IGNORECASE,
-                    )
-                    if not m:
-                        # Fallback: look for standalone 8-char mixed alphanumeric token
-                        for cand in re.findall(r"\b([A-Za-z0-9]{8})\b", clean_txt):
-                            if any(c.isdigit() for c in cand) and any(c.isalpha() for c in cand):
-                                m = re.match(r"([A-Za-z0-9]{8})", cand)
-                                break
-                    if m:
-                        code = m.group(1)
-                        mail.logout()
-                        return code
-            mail.logout()
-        except Exception as e:
-            print(f"[ATSFiller] IMAP code check notice: {e}")
-    return None
+    try:
+        if _frame_has_captcha(page.main_frame):
+            return True
+        for f in page.frames:
+            f_url = (f.url or "").lower()
+            if "hcaptcha.com" in f_url and "frame=challenge" in f_url:
+                try:
+                    el = f.frame_element()
+                    box = el.bounding_box()
+                    if box and box.get("width", 0) > 150 and box.get("height", 0) > 150:
+                        return True
+                except Exception:
+                    pass
+            if f != page.main_frame and ("icims.com" in f_url or "keka.com" in f_url or "greenhouse.io" in f_url):
+                if _frame_has_captcha(f):
+                    return True
+        return False
+    except Exception:
+        return False
 
 
 def _extract_question_context(el) -> str:
     """
     Extracts full label + ancestor question prompt for inputs, textareas, selects,
-    comboboxes, and radios across Ashby, Lever, Greenhouse, Workday, and generic HTML forms.
+    comboboxes, and radios across Ashby, Lever, Greenhouse, Keka, Workday, and generic HTML forms.
     """
     try:
         return (
@@ -210,7 +161,7 @@ def _extract_question_context(el) -> str:
                     const container = node.closest(
                         'li.application-question, .ashby-application-form-field-entry, ' +
                         '.select__container, .text-input-wrapper, .field, .form-group, ' +
-                        'fieldset, [role="group"], [role="radiogroup"], .question'
+                        'fieldset, [role="group"], [role="radiogroup"], .question, [class*="question" i]'
                     );
                     if (container) {
                         const qEl = container.querySelector(
@@ -219,7 +170,7 @@ def _extract_question_context(el) -> str:
                         if (qEl && qEl.innerText) {
                             parts.push(qEl.innerText.trim());
                         } else if (container.innerText) {
-                            parts.push(container.innerText.trim().slice(0, 220));
+                            parts.push(container.innerText.trim().slice(0, 260));
                         }
                     }
                     return parts.join(' ').replace(/\\s+/g, ' ').trim();
@@ -237,32 +188,86 @@ def _scrub_employer_names(val: str) -> str:
     return val
 
 
-def _decide_yes_no_or_option(question_text: str, option_labels: List[str]) -> Optional[str]:
+def _pick_option_with_llm(question_text: str, option_labels: List[str], role_title: str = "Product Analyst") -> Optional[str]:
+    """
+    Uses Gemini to select the single most accurate option for analytical / domain MCQs
+    or custom screening dropdowns (e.g. SQL/Sheets functions, funnel case questions).
+    """
+    valid_opts = [o for o in option_labels if o and not o.strip().lower().startswith(("select", "--", "choose"))]
+    if not valid_opts:
+        return None
+    numbered = "\n".join(f"{i + 1}. {opt}" for i, opt in enumerate(valid_opts))
+    prompt = (
+        f"Role: {role_title}\n"
+        "Candidate Profile: Vishal Gupta — B.Tech Mathematics & Computing (NSUT Delhi), 1+ year experience in Product Analytics, SQL, Python, Sheets/Excel, D2C & quick-commerce startups; based in Delhi NCR / Gurugram and open to relocating anywhere in India (Bengaluru, Mumbai, Hyderabad, Pune); current compensation ~12 LPA, expected compensation 15-18 LPA, notice period 15 days.\n\n"
+        f"Screening Question: {question_text}\n\n"
+        f"Options:\n{numbered}\n\n"
+        "Reply ONLY with the exact option number (e.g. 2) that is the most accurate and technically correct answer."
+    )
+    try:
+        ans = generate_text(
+            prompt=prompt,
+            system_instruction="You are an expert product analyst and hiring assessment solver. Return only the integer index of the single best option.",
+            temperature=0.0,
+        )
+        m = re.search(r"\b(\d+)\b", ans or "")
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx < len(valid_opts):
+                return valid_opts[idx]
+    except Exception as e:
+        print(f"[ATSFiller] LLM option picker fallback notice: {e}")
+    return None
+
+
+def _decide_yes_no_or_option(question_text: str, option_labels: List[str], role_title: str = "Product Analyst") -> Optional[str]:
     """
     Given a question prompt and candidate option labels, picks the best matching option
-    for Vishal Gupta (1 yr exp, India work-authorized, no sponsorship needed, 15-day notice, NSUT B.Tech).
+    for Vishal Gupta (1+ yr exp, 12 LPA current, 15-18 LPA expected, Delhi NCR based & open to relocate, 15-day notice).
+    Falls back to LLM MCQ reasoning for domain/analytical questions instead of picking index 0 blindly.
     """
     q = question_text.lower()
     if not option_labels:
         return None
 
-    # Experience ranges
-    if any(k in q for k in ["experience", "years", "exp"]) and "export" not in q and "expenses" not in q:
-        for opt in option_labels:
-            ol = opt.lower()
-            if any(m in ol for m in ["0-2", "0 - 2", "1-3", "1 - 3", "1-2", "1 to 3", "1 to 2", "1+", "1 year", "2"]):
-                return opt
+    # 1. Current vs Expected Compensation / CTC / Salary ranges
+    if any(k in q for k in ["compensation", "ctc", "salary", "remuneration", "package"]):
+        is_expected = any(k in q for k in ["expected", "desired", "ask", "target"])
+        prefs = (
+            ["15-20", "15 - 20", "14-18", "15-18", "12-18", "15-25", "10-20", "15+", "15 lpa", "16"]
+            if is_expected
+            else ["10-15", "10 - 15", "10-12", "8-12", "10-14", "12 lpa", "10 lpa", "5-10"]
+        )
+        for p_tok in prefs:
+            for opt in option_labels:
+                if p_tok in opt.lower():
+                    return opt
 
-    # Notice period
+    # 2. Experience ranges (prefer 1-2 / 1-3 / 0-2 years first, then 0-1)
+    if any(k in q for k in ["experience", "years", "exp"]) and not any(x in q for x in ["export", "expenses", "expected"]):
+        for p_tok in ["1-2", "1 - 2", "1-3", "1 - 3", "0-2", "0 - 2", "1 to 3", "1 to 2", "1+", "1 year", "0-1", "0 - 1"]:
+            for opt in option_labels:
+                if p_tok in opt.lower():
+                    return opt
+
+    # 3. Notice period / Joining availability
     if any(k in q for k in ["notice", "how soon", "join", "availability"]):
+        for p_tok in ["immediate", "0-15", "15", "0-30", "0 - 30", "less than 30", "< 30", "1 month", "30 days"]:
+            for opt in option_labels:
+                if p_tok in opt.lower():
+                    return opt
+
+    # 4. Residing in non-NCR city with relocation sub-options (e.g. "Are you residing in Bengaluru?")
+    non_ncr_cities = ["bengaluru", "bangalore", "mumbai", "hyderabad", "pune", "chennai"]
+    if any(c in q for c in non_ncr_cities) and any(w in q for w in ["resid", "currently in", "living in", "based in", "located in"]):
         for opt in option_labels:
             ol = opt.lower()
-            if any(m in ol for m in ["immediate", "15", "0-15", "less than 30", "< 30", "1 month"]):
+            if ("relocat" in ol or "willing" in ol) and "not open" not in ol and "unwilling" not in ol:
                 return opt
 
-    # How did you hear / learn about this job
+    # 5. How did you hear / learn about this job
     if any(k in q for k in ["how did you learn", "how did you hear", "where did you hear", "source"]):
-        for pref in ["company website", "careers page", "linkedin", "job board", "online", "other"]:
+        for pref in ["linkedin", "company website", "careers page", "job board", "online", "other"]:
             for opt in option_labels:
                 if pref in opt.lower() and "employee" not in opt.lower() and "event" not in opt.lower():
                     return opt
@@ -277,7 +282,7 @@ def _decide_yes_no_or_option(question_text: str, option_labels: List[str]) -> Op
     if no_opt is None:
         no_opt = next((o for o in option_labels if o.strip().lower().startswith("no")), None)
 
-    # Questions where NO is the right answer
+    # 6. Questions where NO is the right answer
     if any(
         k in q
         for k in [
@@ -305,7 +310,7 @@ def _decide_yes_no_or_option(question_text: str, option_labels: List[str]) -> Op
         if no_opt is not None:
             return no_opt
 
-    # Questions where YES is the right answer
+    # 7. Questions where YES is the right answer
     if any(
         k in q
         for k in [
@@ -321,6 +326,7 @@ def _decide_yes_no_or_option(question_text: str, option_labels: List[str]) -> Op
             "bengaluru",
             "delhi",
             "gurgaon",
+            "gurugram",
             "noida",
             "mumbai",
             "hyderabad",
@@ -337,7 +343,7 @@ def _decide_yes_no_or_option(question_text: str, option_labels: List[str]) -> Op
         if yes_opt is not None:
             return yes_opt
 
-    # Gender / EEO defaults if required
+    # 8. Gender / EEO defaults if required
     if "gender" in q:
         for opt in option_labels:
             ol = opt.strip().lower()
@@ -353,6 +359,11 @@ def _decide_yes_no_or_option(question_text: str, option_labels: List[str]) -> Op
             if any(d in ol for d in ["choose not to disclose", "prefer not", "decline", "not a protected", "do not have", "i am not", "south asian", "asian"]):
                 return opt
 
+    # 9. Analytical / Domain MCQ or Custom Screening Question -> Ask LLM!
+    llm_pick = _pick_option_with_llm(question_text, option_labels, role_title=role_title)
+    if llm_pick:
+        return llm_pick
+
     return None
 
 
@@ -361,12 +372,14 @@ def fill_ats_application(
     role_title: str = "Associate Product Manager",
     auto_submit: bool = True,
     shared_browser: Any = None,
+    existing_page: Any = None,
+    leave_open: bool = False,
 ) -> Dict[str, Any]:
     """
     Autofills external company career pages hosted on Greenhouse, Ashby, Lever,
-    Workday, Taleo, BambooHR, or direct corporate career forms.
-    Handles React-Select comboboxes and candidate email OTP verification on Greenhouse.
-    Strictly verifies final submission + confirmation receipt with zero validation errors.
+    Keka, Workday, Taleo, BambooHR, or direct corporate career forms.
+    Strictly verifies final submission + confirmation receipt and NEVER bypasses CAPTCHAs
+    or human-verification challenges.
     """
     result: Dict[str, Any] = {
         "url": url,
@@ -401,53 +414,77 @@ def fill_ats_application(
 
     from contextlib import nullcontext
 
-    owns_browser = shared_browser is None
+    owns_browser = shared_browser is None and existing_page is None
     pw_cm = sync_playwright() if owns_browser else nullcontext(None)
+    lock_fh = None
 
     with pw_cm as p_play:
         target_page = None
         context = None
         browser = shared_browser
         try:
-            if owns_browser:
-                launch_args = [
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ]
+            if owns_browser and sys.platform != "darwin":
                 try:
-                    browser = p_play.chromium.launch(headless=True, args=launch_args)
+                    lock_fh = open("/tmp/cloud_chromium.lock", "w")
+                    fcntl.flock(lock_fh, fcntl.LOCK_EX)
                 except Exception:
-                    browser = p_play.chromium.launch(channel="chrome", headless=True, args=launch_args)
+                    pass
 
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 900},
-            )
+            if existing_page is not None:
+                page = existing_page
+                target_page = page
+            else:
+                if owns_browser:
+                    launch_args = [
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled",
+                    ]
+                    if sys.platform != "darwin":
+                        launch_args.extend(
+                            [
+                                "--disable-gpu",
+                                "--disable-software-rasterizer",
+                                "--disable-extensions",
+                                "--disable-background-networking",
+                                "--renderer-process-limit=1",
+                                "--js-flags=--max-old-space-size=192",
+                                "--blink-settings=imagesEnabled=false",
+                            ]
+                        )
+                    try:
+                        browser = p_play.chromium.launch(headless=True, args=launch_args)
+                    except Exception:
+                        browser = p_play.chromium.launch(channel="chrome", headless=True, args=launch_args)
 
-            if "naukri.com" in url:
-                for ck_path in (
-                    project_root / "data" / "naukri_cookies.json",
-                    Path.home() / "career-agent" / "data" / "naukri_cookies.json",
-                ):
-                    if ck_path.exists():
-                        try:
-                            cookies = json.loads(ck_path.read_text(encoding="utf-8"))
-                            if isinstance(cookies, list) and cookies:
-                                context.add_cookies(cookies)
-                                break
-                        except Exception:
-                            pass
+                context = browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 900},
+                )
 
-            page = context.new_page()
-            target_page = page
+                if "naukri.com" in url:
+                    for ck_path in (
+                        project_root / "data" / "naukri_cookies.json",
+                        Path.home() / "career-agent" / "data" / "naukri_cookies.json",
+                    ):
+                        if ck_path.exists():
+                            try:
+                                cookies = json.loads(ck_path.read_text(encoding="utf-8"))
+                                if isinstance(cookies, list) and cookies:
+                                    context.add_cookies(cookies)
+                                    break
+                            except Exception:
+                                pass
 
-            page.goto(url, wait_until="domcontentloaded", timeout=22000)
-            page.wait_for_timeout(1400)
+                page = context.new_page()
+                target_page = page
+
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(1800)
 
             # --- Follow portal redirects (Indeed, Naukri, LinkedIn) if needed ---
             current_url = page.url
@@ -520,7 +557,7 @@ def fill_ats_application(
                 result["error"] = "blacklisted_employer"
                 return result
 
-            if _has_interactive_captcha(page):
+            if _has_interactive_captcha(page) and not leave_open:
                 print("[ATSFiller] Active CAPTCHA / anti-bot gate detected; skipping manual verification portal.")
                 result["error"] = "captcha_gate_requires_manual_apply"
                 return result
@@ -531,6 +568,10 @@ def fill_ats_application(
                 result["ats_type"] = "lever"
             elif "ashbyhq.com" in dest_url:
                 result["ats_type"] = "ashby"
+            elif "keka.com" in dest_url:
+                result["ats_type"] = "keka"
+            elif "icims.com" in dest_url:
+                result["ats_type"] = "icims"
             elif "myworkdayjobs.com" in dest_url or "workday" in dest_url:
                 result["ats_type"] = "workday"
             elif "taleo.net" in dest_url or "oraclecloud" in dest_url:
@@ -570,14 +611,58 @@ def fill_ats_application(
                     pass
             elif page.locator('input[type="email"], input#email, input[type="file"], input[name="name"]').count() == 0:
                 for trig in page.locator(
+                    'a#link-apply, a.apply, '
                     'button:has-text("Apply for this Job"), a:has-text("Apply for this Job"), '
-                    'button:has-text("Apply Now"), a:has-text("Apply Now"), a:has-text("Apply for this job")'
+                    'button:has-text("Apply Now"), a:has-text("Apply Now"), '
+                    'a:has-text("Apply for this job"), a:has-text("APPLY"), button:has-text("APPLY"), '
+                    'a[aria-label^="Apply"], button[aria-label^="Apply"]'
                 ).all():
                     try:
                         if trig.is_visible() and trig.is_enabled():
-                            trig.click()
-                            page.wait_for_timeout(2500)
+                            href = trig.get_attribute("href")
+                            if href and href.startswith("http"):
+                                page.goto(href, wait_until="domcontentloaded", timeout=40000)
+                                page.wait_for_timeout(3500)
+                                result["ats_url"] = page.url
+                                if "icims.com" in page.url.lower():
+                                    result["ats_type"] = "icims"
+                            else:
+                                trig.click()
+                                page.wait_for_timeout(2800)
+                                result["ats_url"] = page.url
                             break
+                    except Exception:
+                        pass
+
+            # Re-check CAPTCHA after following Apply transition (e.g. Jibe -> iCIMS or Keka)
+            if _has_interactive_captcha(page) and not leave_open:
+                print("[ATSFiller] CAPTCHA gate detected on application form; refusing to bypass.")
+                result["error"] = "captcha_gate_requires_manual_apply"
+                return result
+
+            # Handle iCIMS embedded login/email step if present (stops immediately if hCaptcha opens)
+            if "icims.com" in page.url.lower():
+                ic_frame = next(
+                    (f for f in page.frames if f != page.main_frame and "icims.com" in (f.url or "").lower()),
+                    None,
+                )
+                if ic_frame is not None:
+                    try:
+                        em_inp = ic_frame.locator("input#email, input[name='css_loginName']").first
+                        if em_inp.count() > 0 and em_inp.is_visible():
+                            em_inp.fill(p.get("email", "vishal90301@gmail.com"))
+                            gdpr_chk = ic_frame.locator("input#accept_gdpr").first
+                            if gdpr_chk.count() > 0:
+                                gdpr_chk.check(force=True)
+                            if not leave_open:
+                                nxt_ic = ic_frame.locator("input#enterEmailSubmitButton").first
+                                if nxt_ic.count() > 0:
+                                    nxt_ic.click()
+                                    page.wait_for_timeout(4500)
+                                    if _has_interactive_captcha(page):
+                                        print("[ATSFiller] iCIMS triggered interactive hCaptcha challenge; stopping cleanly.")
+                                        result["error"] = "captcha_gate_requires_manual_apply"
+                                        return result
                     except Exception:
                         pass
 
@@ -586,12 +671,12 @@ def fill_ats_application(
             for step_num in range(1, max_steps + 1):
                 print(f"[ATSFiller] Processing form step {step_num}...")
 
-                # 1. UPLOAD RESUME FILE
+                # 1. UPLOAD RESUME FILE (strictly input[type="file"] so readonly filename text inputs never match)
                 if not result["resume_uploaded"]:
                     preferred_file_selectors = [
-                        "input#resume",
-                        "input#_systemfield_resume",
-                        "input#resume-upload-input",
+                        'input[type="file"]#resume',
+                        'input[type="file"]#_systemfield_resume',
+                        'input[type="file"]#resume-upload-input',
                         'input[type="file"][name="resume"]',
                         'input[type="file"][id*="resume" i]',
                         'input[type="file"][name*="resume" i]',
@@ -725,7 +810,7 @@ def fill_ats_application(
                             continue
 
                         opt_texts = [t for t, _ in opt_pairs]
-                        pick = _decide_yes_no_or_option(cb_ctx_l, opt_texts)
+                        pick = _decide_yes_no_or_option(cb_ctx_l, opt_texts, role_title=role_title)
                         if not pick and is_req_cb:
                             no_cand = next((t for t in opt_texts if t.lower().startswith("no")), None)
                             if no_cand and any(w in cb_ctx_l for w in ["worked", "conflict", "government", "relative", "sponsorship", "visa", "export"]):
@@ -762,14 +847,24 @@ def fill_ats_application(
                         id_attr = (inp.get_attribute("id") or "").lower()
                         name_attr = (inp.get_attribute("name") or "").lower()
                         placeholder = inp.get_attribute("placeholder") or ""
-                        if id_attr.startswith("iti-") or id_attr.startswith("security-input"):
+                        if id_attr.startswith("iti-") or id_attr.startswith("security-input") or "captcha" in id_attr or "captcha" in name_attr:
                             continue
 
                         existing_val = (inp.input_value() or "").strip()
+                        field_identifier = _extract_question_context(inp).lower()
+                        if "captcha" in field_identifier:
+                            continue
+
+                        # Clear bogus resume-autofill middle name if resume parser mispopulated it
+                        if existing_val and ("middlename" in name_attr or "middle name" in field_identifier):
+                            try:
+                                inp.fill("")
+                            except Exception:
+                                pass
+                            continue
                         if existing_val:
                             continue
 
-                        field_identifier = _extract_question_context(inp).lower()
                         if not id_attr and not name_attr and not placeholder and not field_identifier:
                             continue
                         # Skip React-Select hidden dummy required inputs (empty id/name/placeholder inside .select__container)
@@ -792,8 +887,10 @@ def fill_ats_application(
                             if not is_required:
                                 continue
 
-                        # Greenhouse phone input uses local 10-digit number after Country = India (+91)
-                        if result["ats_type"] == "greenhouse" and (id_attr == "phone" or "phone" in field_identifier):
+                        # Greenhouse / Keka phone input uses local 10-digit number after Country = India (+91)
+                        if (result["ats_type"] in ("greenhouse", "keka")) and (
+                            id_attr == "phone" or "mobilephone.number" in name_attr or "phone" in field_identifier
+                        ):
                             raw_phone = re.sub(r"^\+?91", "", p.get("phone", "8368387245")).strip()
                             inp.fill(raw_phone)
                             result["fields_filled"].append({"field": "phone", "value": raw_phone})
@@ -917,8 +1014,53 @@ def fill_ats_application(
                     except Exception:
                         continue
 
-                # 5c. HANDLE REQUIRED CONSENT / PRIVACY CHECKBOXES
+                # 5c. HANDLE MULTI-OPTION CHECKBOX GROUPS & CONSENT CHECKBOXES
+                chk_groups: Dict[str, List[Any]] = {}
+                single_chks: List[Any] = []
                 for chk in page.locator('input[type="checkbox"]').all():
+                    try:
+                        cname = (chk.get_attribute("name") or "").strip()
+                        if cname and ("[]" in cname or cname.startswith("question_")):
+                            chk_groups.setdefault(cname, []).append(chk)
+                        else:
+                            single_chks.append(chk)
+                    except Exception:
+                        continue
+
+                for cname, c_list in chk_groups.items():
+                    try:
+                        if any(c.is_checked() for c in c_list):
+                            continue
+                        q_ctx = _extract_question_context(c_list[0])
+                        opt_map = []
+                        for c_el in c_list:
+                            lbl_txt = (
+                                c_el.evaluate(
+                                    """(node) => {
+                                        if (node.labels && node.labels[0]) return node.labels[0].innerText.trim();
+                                        const p = node.closest('label');
+                                        if (p) return p.innerText.trim();
+                                        return node.getAttribute('value') || '';
+                                    }"""
+                                )
+                                or ""
+                            ).strip()
+                            if lbl_txt:
+                                opt_map.append((lbl_txt, c_el))
+                        labels_only = [lbl for lbl, _ in opt_map]
+                        chosen_lbl = _decide_yes_no_or_option(q_ctx, labels_only, role_title=role_title)
+                        if not chosen_lbl and labels_only:
+                            chosen_lbl = labels_only[0]
+                        if chosen_lbl:
+                            for lbl, c_el in opt_map:
+                                if lbl == chosen_lbl:
+                                    c_el.check(force=True)
+                                    result["fields_filled"].append({"field": q_ctx[:45], "value": chosen_lbl[:40]})
+                                    break
+                    except Exception:
+                        continue
+
+                for chk in single_chks:
                     try:
                         if chk.is_checked():
                             continue
@@ -940,16 +1082,20 @@ def fill_ats_application(
                             "el => Array.from(el.options).map(o => o.text.trim())"
                         )
                         chosen_opt = None
-                        if any(k in s_ctx for k in ["country", "location", "where are you based", "reside"]):
-                            chosen_opt = next((o for o in all_opts if o.lower() == "india"), None) or next(
-                                (o for o in all_opts if "india" in o.lower()), None
+                        if any(k in s_ctx for k in ["mobile", "countrycode", "phone", "dial"]):
+                            chosen_opt = next((o for o in all_opts if "+91" in o or "india" in o.lower()), None)
+                        elif any(k in s_ctx for k in ["country", "location", "where are you based", "reside"]):
+                            chosen_opt = (
+                                next((o for o in all_opts if o.lower() == "india"), None)
+                                or next((o for o in all_opts if "gurugram" in o.lower() or "gurgaon" in o.lower() or "delhi" in o.lower()), None)
+                                or next((o for o in all_opts if "india" in o.lower()), None)
                             )
                         if not chosen_opt:
-                            chosen_opt = _decide_yes_no_or_option(s_ctx, all_opts)
+                            chosen_opt = _decide_yes_no_or_option(s_ctx, all_opts, role_title=role_title)
                         if not chosen_opt:
                             for opt in all_opts:
                                 ol = opt.lower()
-                                if ol in ("india", "delhi", "b.tech", "bachelor's degree", "full-time", "full time"):
+                                if ol in ("india", "delhi", "gurugram", "gurgaon", "b.tech", "bachelor's degree", "full-time", "full time"):
                                     chosen_opt = opt
                                     break
                         if chosen_opt:
@@ -1050,36 +1196,14 @@ def fill_ats_application(
                         except Exception:
                             post_text = ""
 
-                        # Handle Greenhouse candidate email ownership 8-character security code
+                        # Strict compliance: if Greenhouse or ATS shows a human-confirmation security code gate,
+                        # report it honestly without attempting to bypass 'confirm you're a human'.
                         sec_inp0 = page.locator("input#security-input-0, input[id^='security-input-']").first
-                        if (
-                            not email_otp_attempted
-                            and (sec_inp0.count() > 0 and sec_inp0.is_visible())
-                            or ("security code" in post_text and not email_otp_attempted)
-                        ):
-                            email_otp_attempted = True
-                            print("[ATSFiller] Greenhouse requested candidate email verification code; checking vishal90301@gmail.com via IMAP...")
-                            otp_code = _fetch_greenhouse_email_code(min_epoch=submit_epoch, timeout_sec=28)
-                            if otp_code and len(otp_code) == 8:
-                                print(f"[ATSFiller] Retrieved 8-char Greenhouse email code from inbox; completing submission...")
-                                for idx_c, ch in enumerate(otp_code):
-                                    cell = page.locator(f"input#security-input-{idx_c}").first
-                                    if cell.count() > 0 and cell.is_visible():
-                                        cell.fill(ch)
-                                page.wait_for_timeout(600)
-                                resub_btn = _find_submit_button()
-                                if resub_btn is not None:
-                                    resub_btn.click()
-                                    page.wait_for_timeout(5500)
-                                    post_url = page.url.lower()
-                                    try:
-                                        post_text = page.locator("body").inner_text().lower()
-                                    except Exception:
-                                        post_text = ""
-                            else:
-                                result["confirmed"] = False
-                                result["error"] = "email_verification_code_timeout"
-                                break
+                        if (sec_inp0.count() > 0 and sec_inp0.is_visible()) or "security code" in post_text or "verification code" in post_text:
+                            print("[ATSFiller] ATS requested candidate human-verification email code; stopping cleanly for user input.")
+                            result["confirmed"] = False
+                            result["error"] = "human_verification_code_required_in_email"
+                            break
 
                         error_phrases = [
                             "this field is required",
@@ -1162,19 +1286,26 @@ def fill_ats_application(
             print(f"[ATSFiller] Exception during ATS fill: {e}")
             result["error"] = str(e)
         finally:
-            if target_page:
+            if not leave_open:
+                if target_page and existing_page is None:
+                    try:
+                        target_page.close()
+                    except Exception:
+                        pass
+                if context:
+                    try:
+                        context.close()
+                    except Exception:
+                        pass
+                if owns_browser and browser:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+            if lock_fh is not None:
                 try:
-                    target_page.close()
-                except Exception:
-                    pass
-            if context:
-                try:
-                    context.close()
-                except Exception:
-                    pass
-            if owns_browser and browser:
-                try:
-                    browser.close()
+                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                    lock_fh.close()
                 except Exception:
                     pass
 

@@ -30,7 +30,9 @@ def answer_standard_field(field_name: str, options: Optional[list] = None) -> Op
     screen = profile.get("screening_defaults", {})
     fn_lower = field_name.lower().strip()
 
-    # Full Name / Preferred Name
+    # Full Name / Preferred Name / Middle Name
+    if "middle" in fn_lower and "name" in fn_lower or "middlename" in fn_lower:
+        return ""
     if "preferred name" in fn_lower:
         return p.get("first_name", "Vishal")
     if any(k in fn_lower for k in ["full name", "your name", "name"]):
@@ -97,23 +99,29 @@ def answer_standard_field(field_name: str, options: Optional[list] = None) -> Op
         return "Yes"
 
     # Notice Period / Joining Time
-    if any(k in fn_lower for k in ["notice period", "availability", "how soon can you join", "start date"]):
+    if any(k in fn_lower for k in ["notice period", "available to join", "availability", "how soon can you join", "start date"]):
+        if "in days" in fn_lower or "days)" in fn_lower:
+            return "15"
         if options:
             for opt in options:
-                if any(w in opt.lower() for w in ["immediate", "15 days", "1 month"]):
+                if any(w in opt.lower() for w in ["immediate", "15 days", "0-30", "1 month"]):
                     return opt
-        return p.get("notice_period", "Immediate (2026 Graduating Batch)")
+        return p.get("notice_period", "15 days")
 
-    # Current CTC
-    if "current ctc" in fn_lower or "current salary" in fn_lower or "current fixed" in fn_lower:
+    # Current CTC / Compensation
+    if any(k in fn_lower for k in ["current ctc", "current salary", "current fixed", "current compensation"]):
+        if any(n in fn_lower for n in [".amount", "in inr", "(inr)"]):
+            return "1200000"
         if "lpa" in fn_lower or "fixed" in fn_lower:
             return "10"
-        return p.get("current_ctc_lpa", "10 LPA")
+        return p.get("current_ctc_lpa", "12 LPA")
 
-    # Expected CTC
-    if "expected ctc" in fn_lower or "expected salary" in fn_lower or "fixed ctc" in fn_lower:
+    # Expected CTC / Compensation
+    if any(k in fn_lower for k in ["expected ctc", "expected salary", "fixed ctc", "expected compensation"]):
+        if any(n in fn_lower for n in [".amount", "in inr", "(inr)"]):
+            return "1600000"
         if "lpa" in fn_lower or "fixed" in fn_lower:
-            return "15"
+            return "16"
         return p.get("expected_ctc_lpa", "15 - 18 LPA")
 
     # LinkedIn Profile Link
@@ -139,8 +147,10 @@ def answer_standard_field(field_name: str, options: Optional[list] = None) -> Op
     # Experience Years (only for short fields asking for numeric years of experience)
     if "experience" in fn_lower or "years" in fn_lower:
         # If it's a long descriptive or essay question, delegate to open-ended LLM answerer
-        if len(fn_lower) > 35 or any(w in fn_lower for w in ["describe", "explain", "detail", "tell us", "what experience", "datasets", "projects", "outcomes"]):
+        if len(fn_lower) > 45 or any(w in fn_lower for w in ["describe", "explain", "detail", "tell us", "what experience", "datasets", "projects", "outcomes"]):
             return None
+        if "month" in fn_lower:
+            return "0"
         if "sql" in fn_lower:
             return "2"
         if "python" in fn_lower:

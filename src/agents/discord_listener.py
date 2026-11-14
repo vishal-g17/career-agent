@@ -28,6 +28,7 @@ class DiscordListener:
         self.watch_channels: List[str] = list(dict.fromkeys([c for c in [self.channel_id, jobs_ch] if c]))
         self.processed_msg_ids: Set[str] = set()
         self.turn_history: List[Dict[str, Any]] = []
+        self.last_seen_job_url: str = ""
         self.lock = threading.Lock()
 
     def get_live_cloud_base_url(self) -> str:
@@ -98,22 +99,37 @@ class DiscordListener:
             time.sleep(0.3)
 
     def execute_bash_direct(self, cmd: str) -> str:
-        """Fast-path execution for direct shell commands (!sh <cmd>)."""
+        """Fast-path execution for direct shell commands (!sh <cmd>) with hard anti-fake-SQL integrity firewall."""
+        import re
+        cmd_norm = re.sub(r"\s+", " ", cmd.lower())
+        # HARD INTEGRITY FIREWALL: Never allow raw SQL to fake jobs.status = 'applied'
+        if (
+            any(sql_kw in cmd_norm for sql_kw in ["update jobs", "insert into jobs", "replace into jobs"])
+            and ("'applied'" in cmd_norm or '"applied"' in cmd_norm)
+            and "priority_exec.py" not in cmd_norm
+            and "process_external_redirects.py" not in cmd_norm
+        ):
+            return (
+                "🛑 BLOCKED BY INTEGRITY FIREWALL: Raw SQL setting jobs.status='applied' is strictly forbidden! "
+                "Jobs may ONLY be marked 'applied' by real Playwright submission + verified confirmation receipt "
+                "(use `scripts/priority_exec.py apply --url <url>`)."
+            )
         try:
-            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=90, cwd=WORKSPACE_DIR)
+            res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=110, cwd=WORKSPACE_DIR)
             stdout = res.stdout.strip()
             stderr = res.stderr.strip()
             out = stdout if stdout else (stderr if stderr else "Exit code 0 (no output)")
             return out[:1800]
         except subprocess.TimeoutExpired:
-            return "Command timed out after 90 seconds."
+            return "Command timed out after 110 seconds."
         except Exception as e:
             return f"Bash Error: {e}"
 
     def get_system_status_text(self) -> str:
         """Generates real-time system status directly from local processes and DB without LLM quota."""
         import datetime
-        now_str = datetime.datetime.now().strftime('%d %b %Y, %I:%M %p IST')
+        ist_tz = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        now_str = datetime.datetime.now(ist_tz).strftime('%d %b %Y, %I:%M %p IST')
         lines = [f"📊 **Live Systems Status Report** ({now_str})\n"]
 
         ps_res = subprocess.run(['ps', 'aux'], capture_output=True, text=True).stdout
@@ -245,8 +261,11 @@ class DiscordListener:
             "`linkedin-dashboard.service` + `linkedin-dashboard-tunnel.service` "
             f"(Live Master Sheet: `{live_base}/sheet`, Clean Excel Download: `{live_base}/download/MASTER_LEADS_SHEET.xlsx`, Clean CSV: `{live_base}/download/ACTIVE_DELIVERED_LEADS.csv`, Dashboard: `{live_base}/p/dashboard`), "
             "and `linkedin-discord-listener.service` (this Discord CLI daemon). "
-            "Note on LinkedIn: LinkedIn's edge firewall returns HTTP 403 on Oracle Cloud datacenter IPs (`130.210.108.55`), so LinkedIn browser actions run over Vishal's residential Mac Ridealong session via the 1.2s HTTPS Priority Bridge (`priority_exec.py` <-> `run_mac_linkedin_bridge.py`).\n"
+            "Note on Job Applications & LinkedIn Posts: `scripts/priority_exec.py apply --url <url>` runs 24/7 directly on this Cloud VM! It automatically unwraps `lnkd.in/p/...` and `linkedin.com/posts/...` via OpenGraph HTML, extracts direct ATS links (Greenhouse, Lever, Ashby, Keka, Workday, Google Forms) + recruiter emails, and runs headless Playwright directly on the Cloud VM even when Vishal's Mac is asleep! Only pure `linkedin.com/jobs/view/...` Easy Apply pages and LinkedIn DMs require the residential Mac Ridealong session.\n"
             f"• To stop, pause, start, or check LinkedIn automation from this VM, run `{py_exec} {WORKSPACE_DIR}/src/services/linkedin_control.py stop` or `start` or `status`.\n"
+            "• 🚨 ABSOLUTE HONESTY & INTEGRITY LAW:\n"
+            "  - NEVER run raw SQL (`UPDATE jobs SET status='applied'` or `INSERT INTO jobs`) to fake job applications! That is strictly blocked by the firewall.\n"
+            "  - NEVER say Greenhouse, Lever, Ashby, Keka, or `lnkd.in/p/...` links cannot be automated from the Cloud VM — ALWAYS run `priority_exec.py apply --url <url>` immediately and report its real output!\n"
             "• 🚨 PRIORITY #0 IMMEDIATE EXECUTION LAW (APPLIES TO EVERY TASK — LINKEDIN, EMAIL, PORTALS, DATA, SHEET, CONFIG):\n"
             "  Whenever Vishal asks you to do ANYTHING in `#prompt`, DO IT IMMEDIATELY ON PRIORITY #0 RIGHT NOW! NEVER queue his request behind background batches and NEVER reply 'Queued, will run later'!\n"
             "  Use the unified synchronous Priority #0 Executor (which executes immediately and waits for real verified completion before returning):\n"
@@ -292,7 +311,7 @@ class DiscordListener:
             }]
         }]
 
-        models_to_try = ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
+        models_to_try = ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
         active_model_idx = 0
 
         try:
@@ -309,7 +328,7 @@ class DiscordListener:
                 payload = {
                     "systemInstruction": {"parts": [{"text": system_context}]},
                     "contents": contents,
-                    "generationConfig": {"maxOutputTokens": 1200, "temperature": 0.2}
+                    "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.2}
                 }
                 if not is_final_summary:
                     payload["tools"] = tools_spec
@@ -458,6 +477,58 @@ class DiscordListener:
             self.send_chunked(target_channel, self.get_sheet_links_message())
             self.client.add_reaction(target_channel, msg_id, "✅")
             return
+
+        # 0b. Deterministic Priority #0 Fast-Path for Job / Post URLs & "fill it" follow-ups!
+        import re
+        urls_in_msg = [u.rstrip(".,;>)") for u in re.findall(r"https?://[^\s<>]+", text)]
+        job_url_domains = (
+            "greenhouse.io", "lever.co", "ashbyhq.com", "keka.com", "myworkdayjobs.com",
+            "lnkd.in/", "linkedin.com/posts/", "linkedin.com/feed/update/", "linkedin.com/jobs/",
+            "forms.gle", "docs.google.com/forms", "smartrecruiters.com", "bamboohr.com",
+            "icims.com", "medpace.com", "careers.", "jobs."
+        )
+        matched_job_urls = [
+            u for u in urls_in_msg
+            if any(dom in u.lower() for dom in job_url_domains) and "linkedin.com/in/" not in u.lower()
+        ]
+        if matched_job_urls:
+            self.last_seen_job_url = matched_job_urls[0]
+
+        is_fill_followup = (
+            not urls_in_msg
+            and bool(self.last_seen_job_url)
+            and len(text.split()) <= 6
+            and any(k in lower for k in ["fill it", "fill this", "apply", "apply now", "submit it", "do it"])
+        )
+        is_direct_url_apply = bool(matched_job_urls) and (
+            len(text.split()) <= 10
+            or any(k in lower for k in ["apply", "fill", "submit", "job", "check this"])
+        )
+        if is_direct_url_apply or is_fill_followup:
+            target_apply_url = matched_job_urls[0] if matched_job_urls else self.last_seen_job_url
+            print(f"[DiscordCLI] Deterministic Priority #0 Apply Fast-Path -> {target_apply_url}")
+            py_bin = sys.executable or "python3"
+            exec_script = str(PROJECT_ROOT / "scripts" / "priority_exec.py")
+            try:
+                proc = subprocess.run(
+                    [py_bin, exec_script, "apply", "--url", target_apply_url, "--channel", target_channel],
+                    cwd=WORKSPACE_DIR,
+                    capture_output=True,
+                    text=True,
+                    timeout=140,
+                )
+                out_raw = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+                clean_lines = [
+                    ln for ln in out_raw.splitlines()
+                    if not ln.startswith("[ATSFiller]") and not ln.startswith("[LLM]")
+                ]
+                reply_msg = "\n".join(clean_lines).strip() or out_raw or "⚠️ Application attempt finished with no output."
+                self.send_chunked(target_channel, reply_msg[:1900])
+                self.client.add_reaction(target_channel, msg_id, "✅")
+                return
+            except Exception as ae:
+                self.send_chunked(target_channel, f"❌ Priority Apply Error on `{target_apply_url}`: `{ae}`")
+                return
 
         # 1. Fast path: Direct Raw Terminal / Shell Execution (!sh <cmd> or !bash <cmd>)
         if text.startswith("!sh ") or text.startswith("!bash ") or text.startswith("!run "):
