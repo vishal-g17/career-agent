@@ -354,7 +354,7 @@ tr.table-row:hover {{ background: rgba(56, 189, 248, 0.04); }}
     <header>
         <div class="title-area">
             <h1>🚀 Autonomous Career Autopilot — Live Command Tracker</h1>
-            <p>End-to-End Tracking: 153 Submitted Applications &bull; 1,495 Cold Outreach Leads &bull; 3 Inbound Recruiter Replies</p>
+            <p>End-to-End Tracking: {total_applied:,} Submitted Applications &bull; {total_emails_sent:,} Cold Outreach Leads &bull; {total_replies:,} Inbound Recruiter Replies &bull; {total_li_sent:,} LinkedIn DMs</p>
         </div>
         <div class="status-pill">
             <span class="status-dot"></span> 24/7 CLOUD AUTOPILOT ACTIVE (Oracle VM)
@@ -366,7 +366,7 @@ tr.table-row:hover {{ background: rgba(56, 189, 248, 0.04); }}
         <div class="kpi-card" style="border-top: 3px solid #22c55e;">
             <div class="kpi-label">Applications Submitted</div>
             <div class="kpi-value" style="color:#4ade80;">{total_applied}</div>
-            <div class="kpi-sub">Across ATS, Naukri & Forms</div>
+            <div class="kpi-sub">Instahyre, ATS, Naukri & LinkedIn</div>
         </div>
         <div class="kpi-card" style="border-top: 3px solid #38bdf8;">
             <div class="kpi-label">Cold Emails Delivered</div>
