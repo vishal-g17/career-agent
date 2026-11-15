@@ -181,8 +181,8 @@ def _try_apply_on_loaded_linkedin_job(page, context, port: str, jid: str, title:
                     conn.execute(
                         """
                         INSERT INTO jobs (id, title, company, location, url, match_score, scorecard, status)
-                        VALUES (?, ?, ?, 'India', ?, 90, json_object('applied_via', 'linkedin_easy_apply'), 'applied')
-                        ON CONFLICT(id) DO UPDATE SET status='applied', scorecard=json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'linkedin_easy_apply')
+                        VALUES (?, ?, ?, 'India', ?, 90, json_object('applied_via', 'linkedin_easy_apply', 'applied_at', CURRENT_TIMESTAMP), 'applied')
+                        ON CONFLICT(id) DO UPDATE SET status='applied', scorecard=json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'linkedin_easy_apply', '$.applied_at', CURRENT_TIMESTAMP)
                         """,
                         (jid, title, comp, job_url),
                     )
@@ -252,7 +252,7 @@ def _try_apply_on_loaded_linkedin_job(page, context, port: str, jid: str, title:
             ats_res = fill_ats_application(ext_url, role_title=f"{title} @ {comp}", auto_submit=True, existing_page=page, leave_open=True)
             if ats_res.get("submitted") and ats_res.get("confirmed"):
                 conn.execute(
-                    "UPDATE jobs SET status='applied', url=?, scorecard=json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'linkedin_unwrapped_cdp') WHERE id=?",
+                    "UPDATE jobs SET status='applied', url=?, scorecard=json_set(COALESCE(scorecard, '{}'), '$.applied_via', 'linkedin_unwrapped_cdp', '$.applied_at', CURRENT_TIMESTAMP) WHERE id=?",
                     (ats_res.get("ats_url") or ext_url, jid),
                 )
                 conn.commit()

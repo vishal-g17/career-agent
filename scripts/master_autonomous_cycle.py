@@ -1091,9 +1091,9 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage A ({batch_msg_count}/{batch_target} msgs | {daily_1st_sent} today)")
                 print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/{batch_target}) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
-                # STAGE 0: Queue Check & Auto-Refill if low (only between batches or when critically low)
+                # STAGE 0: Queue Check & Auto-Refill if low (scroll up to 300 passes so older connections past top 760 are reached!)
                 if queue_pending < 5:
-                    refill_connections_queue(page, conn, min_needed=30, max_scrolls=140)
+                    refill_connections_queue(page, conn, min_needed=30, max_scrolls=300)
 
                 # STAGE A: 1st-Degree Messaging (Randomized batch size & <2 min random gap, 1 task at a time)
                 if daily_1st_sent < DAILY_MAX_1ST_DEGREE:
