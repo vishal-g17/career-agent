@@ -980,7 +980,7 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 # 0. Cloud-Synced Manual / Logout Stop Check (#prompt or CLI)
                 ctl_state = sync_control_with_cloud()
                 if not ctl_state.get("linkedin_enabled", True):
-                    # Auto-resume immediately once Vishal signs back into LinkedIn in Ridealong (when stopped due to logout / waiting_for_login)
+                    # Auto-resume immediately once Vishal completes LinkedIn login + 2FA in Ridealong
                     if ctl_state.get("reason") in ("linkedin_logged_out", "waiting_for_login"):
                         try:
                             if browser is None or not browser.is_connected():
@@ -991,14 +991,27 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                                 for c in context.cookies()
                             )
                             if has_li_at:
-                                print("[Cycle:Control] 🟢 Detected fresh LinkedIn login (`li_at` present)! Auto-starting LinkedIn cycle now!")
-                                set_linkedin_enabled(True, reason="active", updated_by="auto_resume_on_login")
-                                send_discord_cycle_note(
-                                    "🟢 **LinkedIn Login Detected — Automation Started Automatically!**\n"
-                                    "• Resuming Stage A (1st-Degree DMs) + Feed Recruiter Scan + LinkedIn Easy Apply + Naukri + Indeed."
-                                )
-                                paused_logged = False
-                                continue
+                                probe_pg = context.new_page()
+                                try:
+                                    probe_pg.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=18000)
+                                    probe_pg.wait_for_timeout(2000)
+                                    feed_ok = not is_linkedin_logged_out(probe_pg)
+                                finally:
+                                    probe_pg.close()
+                                if feed_ok:
+                                    if page is not None and not page.is_closed():
+                                        try:
+                                            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=18000)
+                                        except Exception:
+                                            pass
+                                    print("[Cycle:Control] 🟢 Verified live LinkedIn Feed session! Auto-starting LinkedIn cycle now!")
+                                    set_linkedin_enabled(True, reason="active", updated_by="auto_resume_on_login")
+                                    send_discord_cycle_note(
+                                        "🟢 **LinkedIn Login Verified — Automation Started Automatically!**\n"
+                                        "• Resuming Stage A (1st-Degree DMs) + Feed Recruiter Scan + LinkedIn Easy Apply + Naukri + Indeed."
+                                    )
+                                    paused_logged = False
+                                    continue
                         except Exception:
                             pass
                     if not paused_logged:
@@ -1023,6 +1036,12 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 if paused_logged:
                     print("[Cycle:Control] 🟢 LinkedIn automation RESUMED via control state!")
                     paused_logged = False
+                    if page is not None and not page.is_closed():
+                        try:
+                            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20000)
+                            page.wait_for_timeout(1500)
+                        except Exception:
+                            pass
 
                 # 1. Check Operating Window & Temporary Suspension
                 if not is_in_active_window():
