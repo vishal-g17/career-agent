@@ -980,6 +980,27 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 # 0. Cloud-Synced Manual / Logout Stop Check (#prompt or CLI)
                 ctl_state = sync_control_with_cloud()
                 if not ctl_state.get("linkedin_enabled", True):
+                    # Auto-resume immediately once Vishal signs back into LinkedIn in Ridealong (when stopped due to logout / waiting_for_login)
+                    if ctl_state.get("reason") in ("linkedin_logged_out", "waiting_for_login"):
+                        try:
+                            if browser is None or not browser.is_connected():
+                                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
+                                context = browser.contexts[0]
+                            has_li_at = any(
+                                c.get("name") == "li_at" and c.get("value")
+                                for c in context.cookies()
+                            )
+                            if has_li_at:
+                                print("[Cycle:Control] 🟢 Detected fresh LinkedIn login (`li_at` present)! Auto-starting LinkedIn cycle now!")
+                                set_linkedin_enabled(True, reason="active", updated_by="auto_resume_on_login")
+                                send_discord_cycle_note(
+                                    "🟢 **LinkedIn Login Detected — Automation Started Automatically!**\n"
+                                    "• Resuming Stage A (1st-Degree DMs) + Feed Recruiter Scan + LinkedIn Easy Apply + Naukri + Indeed."
+                                )
+                                paused_logged = False
+                                continue
+                        except Exception:
+                            pass
                     if not paused_logged:
                         print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Naukri + Indeed continue independently during 10 AM - 11 PM IST!")
                         paused_logged = True
