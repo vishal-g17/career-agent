@@ -588,8 +588,12 @@ def apply_to_indeed_job(job_url: str, role_title: str = "Product Analyst") -> Di
             except Exception:
                 pass
 
-    # If external redirect was extracted, run ATS filler outside Ridealong context cleanly
-    if external_target_url:
+    # If external redirect was extracted AND matches a supported zero-login ATS, run ATS filler outside Ridealong context cleanly
+    supported_ats_tokens = (
+        "greenhouse.io", "gh_jid=", "lever.co", "ashbyhq.com", "pyjamahr.com",
+        "keka.com", "bamboohr.com", "smartrecruiters.com", "forms.gle", "docs.google.com/forms",
+    )
+    if external_target_url and any(tok in external_target_url.lower() for tok in supported_ats_tokens):
         try:
             from .ats_filler import fill_ats_application
             ats_res = fill_ats_application(external_target_url, role_title=role_title, auto_submit=True)

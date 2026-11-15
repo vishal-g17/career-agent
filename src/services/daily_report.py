@@ -59,14 +59,14 @@ def collect_daily_metrics(target_date_ist: Optional[str] = None) -> Dict[str, An
     conn = sqlite3.connect(db_path, timeout=20.0)
     cur = conn.cursor()
 
-    # 1. Jobs Applied (Today vs All-Time by Platform)
+    # 1. Jobs Applied (Today vs All-Time by Platform — prefer scorecard.$.applied_at when job was discovered on an earlier day!)
     job_rows = cur.execute(
         """
         SELECT id, title, company, url, COALESCE(scorecard, ''),
-               date(created_at, '+5 hours', '30 minutes') AS ist_date
+               date(COALESCE(json_extract(scorecard, '$.applied_at'), created_at), '+5 hours', '30 minutes') AS ist_date
         FROM jobs
         WHERE status = 'applied'
-        ORDER BY created_at DESC
+        ORDER BY COALESCE(json_extract(scorecard, '$.applied_at'), created_at) DESC
         """
     ).fetchall()
 

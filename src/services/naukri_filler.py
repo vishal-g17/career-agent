@@ -368,8 +368,17 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
             pass
 
         # Outside cloud_browser_page context: Naukri browser is now closed before running ATS autofill!
-        if extracted_dest_url and extracted_dest_url != job_url and "naukri.com" not in extracted_dest_url:
-            print(f"[NaukriApply] Extracted company portal URL: {extracted_dest_url}")
+        supported_ats_tokens = (
+            "greenhouse.io", "gh_jid=", "lever.co", "ashbyhq.com", "pyjamahr.com",
+            "keka.com", "bamboohr.com", "smartrecruiters.com", "forms.gle", "docs.google.com/forms",
+        )
+        if (
+            extracted_dest_url
+            and extracted_dest_url != job_url
+            and "naukri.com" not in extracted_dest_url
+            and any(tok in extracted_dest_url.lower() for tok in supported_ats_tokens)
+        ):
+            print(f"[NaukriApply] Extracted supported ATS URL: {extracted_dest_url}")
             from .ats_filler import fill_ats_application
             ats_res = fill_ats_application(extracted_dest_url, role_title=role_title, auto_submit=True)
             if ats_res.get("submitted") and ats_res.get("confirmed"):
@@ -381,6 +390,8 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
             result["status"] = "external_redirect"
             result["external_url"] = extracted_dest_url
             return result
+        if extracted_dest_url and "naukri.com" not in extracted_dest_url:
+            result["external_url"] = extracted_dest_url
         result["applied"] = False
         result["status"] = "external_redirect"
         return result
