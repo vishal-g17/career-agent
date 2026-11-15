@@ -57,6 +57,8 @@ def run_portal_worker():
     print("=" * 80 + "\n")
 
     iteration = 0
+    # Start after a 20m initial breather for Instahyre so any sliding 429 window clears completely, then poll every 25m
+    next_instahyre_ts = time.time() + 1200.0
     while True:
         iteration += 1
         now_str = datetime.now().strftime("%I:%M %p")
@@ -66,13 +68,16 @@ def run_portal_worker():
             f"Pending Naukri: {naukri_p} | Pending Direct ATS: {redir_p} | Total Applied: {applied_tot}"
         )
 
-        # 0. Run 24/7 Instahyre Auto-Discovery + Verified Auto-Apply (0 MB browser RAM!)
-        try:
-            ih_res = run_instahyre_auto_apply(max_apps=8)
-            if ih_res.get("applied", 0) > 0:
-                print(f"[PortalWorker] Instahyre confirmed {ih_res['applied']} new application(s) this sweep!")
-        except Exception as ihe:
-            print(f"[PortalWorker] Instahyre sweep note: {ihe}")
+        # 0. Run 24/7 Instahyre Auto-Discovery + Verified Auto-Apply every 25m (prevents HTTP 429 rate-limiting!)
+        if time.time() >= next_instahyre_ts:
+            try:
+                ih_res = run_instahyre_auto_apply(max_apps=10)
+                if ih_res.get("applied", 0) > 0:
+                    print(f"[PortalWorker] Instahyre confirmed {ih_res['applied']} new application(s) this sweep!")
+                next_instahyre_ts = time.time() + 1500.0
+            except Exception as ihe:
+                print(f"[PortalWorker] Instahyre sweep note: {ihe}")
+                next_instahyre_ts = time.time() + 1800.0
 
         # 1. Discover fresh openings on startup, when queue is low, or every 4 sweeps
         if iteration == 1 or iteration % 4 == 0 or (naukri_p == 0 and redir_p < 5):
