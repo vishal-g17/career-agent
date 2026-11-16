@@ -1296,6 +1296,14 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
             page.wait_for_timeout(3200)
             if is_linkedin_logged_out(page):
                 set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="feed_scanner")
+                from ..services.system_alerter import send_system_alert
+                send_system_alert(
+                    platform="LinkedIn",
+                    issue_type="logged_out",
+                    summary="LinkedIn logged out or hit a security checkpoint during Personal Feed scan.",
+                    fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back into LinkedIn (auto-resumes once `li_at` cookie is active, or type `start linkedin` in `#prompt`).",
+                    details=page.url,
+                )
                 return []
 
             feed_scrolls = random.randint(8, 13)
@@ -1351,6 +1359,14 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
                     page.wait_for_timeout(random.randint(2800, 4800))
                     if is_linkedin_logged_out(page):
                         set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="feed_scanner")
+                        from ..services.system_alerter import send_system_alert
+                        send_system_alert(
+                            platform="LinkedIn",
+                            issue_type="logged_out",
+                            summary="LinkedIn logged out or hit a checkpoint during Hiring Post Search.",
+                            fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> complete LinkedIn login/2FA.",
+                            details=page.url,
+                        )
                         return all_leads
 
                     q_leads_before = len(all_leads)

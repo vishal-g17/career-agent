@@ -415,6 +415,13 @@ def run_instahyre_auto_apply(max_apps: int = 10) -> Dict[str, Any]:
     headers = _load_instahyre_headers()
     if not headers:
         print("[Instahyre] No valid data/instahyre_cookies.json found yet — skipping sweep.")
+        from .system_alerter import send_system_alert
+        send_system_alert(
+            platform="Instahyre",
+            issue_type="missing_cookies",
+            summary="Instahyre cookies (`data/instahyre_cookies.json`) are missing or incomplete (`sessionid` / `csrftoken`).",
+            fix_steps="Log into `https://www.instahyre.com` in Ridealong (`http://127.0.0.1:8083`) and sync `data/instahyre_cookies.json` to Cloud VM.",
+        )
         return {"scanned": 0, "applied": 0, "status": "no_cookies"}
 
     conn = sqlite3.connect(_get_db_path(), timeout=30.0)
@@ -465,7 +472,25 @@ def run_instahyre_auto_apply(max_apps: int = 10) -> Dict[str, Any]:
         if e.code in (401, 403):
             conn.close()
             print(f"[Instahyre] Session expired or unauthorized (HTTP {e.code}). Waiting for next Mac cookie sync.")
+            from .system_alerter import send_system_alert
+            send_system_alert(
+                platform="Instahyre",
+                issue_type="logged_out",
+                summary=f"Instahyre session expired or unauthorized (HTTP `{e.code}`).",
+                fix_steps="Open `https://www.instahyre.com` in Ridealong (`http://127.0.0.1:8083`), sign in, and sync fresh cookies to Cloud VM.",
+                details=f"HTTP {e.code} on /api/v1/candidate_opportunities/candidate_matching",
+            )
             return {"scanned": 0, "applied": 0, "status": f"auth_expired_{e.code}"}
+        if e.code == 429 or e.code >= 500:
+            from .system_alerter import send_system_alert
+            send_system_alert(
+                platform="Instahyre",
+                issue_type="api_error",
+                summary=f"Instahyre API returned HTTP `{e.code}` during opportunity scan.",
+                fix_steps="Automatic backoff active (25–30m). If HTTP 403/401 persists, refresh Instahyre login in Ridealong.",
+                details=str(e),
+                cooldown_minutes=60,
+            )
     except Exception as e:
         print(f"[Instahyre] candidate_matching note: {e}")
 
@@ -542,6 +567,12 @@ def run_instahyre_auto_apply(max_apps: int = 10) -> Dict[str, Any]:
             time.sleep(0.35)
 
     conn.close()
+    if total_scanned > 0:
+        try:
+            from .system_alerter import clear_system_alert
+            clear_system_alert("Instahyre")
+        except Exception:
+            pass
     print(
         f"[Instahyre] Sweep #{_SWEEP_COUNTER} (offset={page_offset}) complete: "
         f"Scanned {total_scanned} listings | Qualified {len(candidates)} | Confirmed {applied_count} new applications."

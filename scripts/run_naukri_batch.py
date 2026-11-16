@@ -185,6 +185,19 @@ def run_naukri_batch(limit: int = 50):
 
             elif status in ("needs_login", "datacenter_blocked"):
                 print(f"[NaukriBatch] -> Naukri returned '{status}'; leaving jobs untouched and stopping batch cleanly.")
+                if status == "needs_login" or sys.platform == "darwin":
+                    from src.services.system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="Naukri",
+                        issue_type="logged_out" if status == "needs_login" else "access_denied",
+                        summary=(
+                            "Naukri session is logged out ('Login to apply' shown instead of Apply)."
+                            if status == "needs_login"
+                            else "Naukri returned Access Denied on Mac browser."
+                        ),
+                        fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back in at `https://www.naukri.com/nlogin/login`.",
+                        details=url,
+                    )
                 break
 
             elif status == "external_redirect":
@@ -217,10 +230,28 @@ def run_naukri_batch(limit: int = 50):
             cur.execute('UPDATE jobs SET status = "failed" WHERE id = ?', (jid,))
             conn.commit()
             print(f"[NaukriBatch] -> Error processing job: {e} (marked as failed).")
+            if sys.platform == "darwin":
+                try:
+                    from src.services.system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="Naukri",
+                        issue_type="runtime_error",
+                        summary=f"Naukri auto-apply encountered a browser/runtime error on `{title} @ {company}`.",
+                        fix_steps="Check Ridealong (`http://127.0.0.1:8083`) and Naukri tab health.",
+                        details=str(e),
+                    )
+                except Exception:
+                    pass
 
         # Humanized delay between applications
         time.sleep(5)
 
+    if applied_count > 0:
+        try:
+            from src.services.system_alerter import clear_system_alert
+            clear_system_alert("Naukri")
+        except Exception:
+            pass
     _sync_naukri_updates_to_cloud(conn)
     conn.close()
     print(f"\n[NaukriBatch] Completed! Applied: {applied_count}, External Redirects: {redirect_count}, Failed/Skipped: {failed_count}")

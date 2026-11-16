@@ -176,6 +176,19 @@ def run_indeed_batch(limit: int = 12) -> int:
             conn.commit()
         elif st in ("captcha_gate", "needs_login", "ridealong_unavailable"):
             print(f"[IndeedBatch] Stopping batch cleanly due to '{st}' (leaving remaining jobs untouched).")
+            from src.services.system_alerter import send_system_alert
+            fix_map = {
+                "captcha_gate": "Open Ridealong (`http://127.0.0.1:8083`) -> click the Cloudflare human verification checkbox on `in.indeed.com`.",
+                "needs_login": "Open Ridealong (`http://127.0.0.1:8083`) -> log back into `https://in.indeed.com`.",
+                "ridealong_unavailable": "Start Ridealong on Mac (`ridealong start`) and verify `http://127.0.0.1:8083` is reachable.",
+            }
+            send_system_alert(
+                platform="Indeed",
+                issue_type="logged_out" if st == "needs_login" else st,
+                summary=f"Indeed auto-apply paused cleanly due to `{st}` on `{title} @ {company}`.",
+                fix_steps=fix_map.get(st, "Check Indeed inside Ridealong (`http://127.0.0.1:8083`)."),
+                details=url,
+            )
             break
         elif st == "external_redirect":
             cur.execute("UPDATE jobs SET status = 'external_redirect' WHERE id = ?", (jid,))
@@ -190,6 +203,12 @@ def run_indeed_batch(limit: int = 12) -> int:
 
         time.sleep(4)
 
+    if applied_count > 0:
+        try:
+            from src.services.system_alerter import clear_system_alert
+            clear_system_alert("Indeed")
+        except Exception:
+            pass
     _sync_indeed_updates_to_cloud(conn)
     conn.close()
     print(f"[IndeedBatch] Done! Confirmed Indeed applications: {applied_count}")

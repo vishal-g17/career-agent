@@ -442,6 +442,14 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
                 time.sleep(3.0)
                 if is_linkedin_logged_out(page):
                     set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="linkedin_jobs")
+                    from src.services.system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="LinkedIn",
+                        issue_type="logged_out",
+                        summary="LinkedIn session logged out during LinkedIn Easy Apply stage.",
+                        fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back into LinkedIn.",
+                        details=page.url,
+                    )
                     break
                 links = page.evaluate(
                     """() => Array.from(document.querySelectorAll('a[href*="/jobs/view/"]')).slice(0, 8).map(a => ({
@@ -468,6 +476,12 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
             except Exception:
                 pass
 
+    if applied_count > 0:
+        try:
+            from src.services.system_alerter import clear_system_alert
+            clear_system_alert("LinkedIn")
+        except Exception:
+            pass
     _sync_job_statuses_to_cloud_vm(conn)
     conn.close()
     print(f"\n[LinkedInJobs] Stage complete! Submitted & confirmed {applied_count} applications.")

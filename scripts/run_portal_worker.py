@@ -77,6 +77,17 @@ def run_portal_worker():
                 next_instahyre_ts = time.time() + 1500.0
             except Exception as ihe:
                 print(f"[PortalWorker] Instahyre sweep note: {ihe}")
+                try:
+                    from src.services.system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="Instahyre",
+                        issue_type="runtime_error",
+                        summary="Unhandled exception during 24/7 Cloud Instahyre sweep.",
+                        fix_steps="Check `journalctl -u linkedin-portal-worker` on Cloud VM (`130.210.108.55`).",
+                        details=str(ihe),
+                    )
+                except Exception:
+                    pass
                 next_instahyre_ts = time.time() + 1800.0
 
         # 1. Discover fresh openings on startup, when queue is low, or every 4 sweeps

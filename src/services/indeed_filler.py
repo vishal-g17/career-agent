@@ -136,9 +136,25 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
 
                 if _is_cloudflare_or_captcha_gate(page):
                     print("[IndeedScrape] Cloudflare/anti-bot gate detected on Indeed; stopping scrape cleanly.")
+                    from .system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="Indeed",
+                        issue_type="captcha_gate",
+                        summary="Cloudflare / human verification gate detected while searching Indeed.",
+                        fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> switch to `in.indeed.com` and click the verification checkbox.",
+                        details=page.url,
+                    )
                     break
                 if _is_indeed_logged_out(page):
                     print("[IndeedScrape] Indeed session requires sign-in; stopping scrape cleanly.")
+                    from .system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="Indeed",
+                        issue_type="logged_out",
+                        summary="Indeed session signed out (Sign-in prompt detected).",
+                        fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back into `https://in.indeed.com`.",
+                        details=page.url,
+                    )
                     break
 
                 cards = page.evaluate(

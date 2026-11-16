@@ -809,19 +809,19 @@ def sync_new_outreach_leads_to_cloud_vm(conn) -> int:
 
 
 def _handle_linkedin_logout(page) -> None:
-    """Hard-stops all LinkedIn automation on logout/checkpoint until user explicitly restarts via CLI or #prompt."""
+    """Hard-stops all LinkedIn automation on logout/checkpoint until user logs back in or restarts via CLI/#prompt."""
     cur_url = getattr(page, "url", "") if page else ""
     print(f"[Cycle:LogoutGuard] 🛑 LinkedIn logout/checkpoint detected ({cur_url})! Hard-stopping all LinkedIn automation.")
     set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="auto_logout_guard")
     try:
-        from src.engine.discord_client import DiscordClient
-        from src import config
-        DiscordClient().send_message(
-            config.DISCORD_PROMPT_CHANNEL_ID,
-            "🛑 **LinkedIn Logged Out — All LinkedIn Automation Hard-Stopped!**\n"
-            f"• Detected login/checkpoint URL: `{cur_url}`\n"
-            "• All LinkedIn tasks (messaging, feed hunt, LinkedIn Jobs) are **completely stopped** and will NOT auto-retry.\n"
-            "• Log back in via your Ridealong viewer and send **`start linkedin`** here in `#prompt` (or on CLI) when ready to resume."
+        from src.services.system_alerter import send_system_alert
+        send_system_alert(
+            platform="LinkedIn",
+            issue_type="logged_out",
+            summary="LinkedIn logged out or hit a security checkpoint — all LinkedIn tasks safely paused.",
+            fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back into LinkedIn (the daemon auto-resumes as soon as login completes, or reply `start linkedin` in `#prompt`).",
+            details=cur_url,
+            cooldown_minutes=30,
         )
     except Exception:
         pass
@@ -1167,7 +1167,8 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                                     probe_pg.wait_for_timeout(2000)
                                     feed_ok = not is_linkedin_logged_out(probe_pg)
                                 finally:
-                                    probe_pg.close()
+                                    if len(context.pages) > 1:
+                                        probe_pg.close()
                                 if feed_ok:
                                     if page is not None and not page.is_closed():
                                         try:
@@ -1176,6 +1177,11 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                                             pass
                                     print("[Cycle:Control] 🟢 Verified live LinkedIn Feed session! Auto-starting LinkedIn cycle now!")
                                     set_linkedin_enabled(True, reason="active", updated_by="auto_resume_on_login")
+                                    try:
+                                        from src.services.system_alerter import clear_system_alert
+                                        clear_system_alert("LinkedIn")
+                                    except Exception:
+                                        pass
                                     send_discord_cycle_note(
                                         "🟢 **LinkedIn Login Verified — Automation Started Automatically!**\n"
                                         "• Resuming Stage A (1st-Degree DMs) + Feed Recruiter Scan + LinkedIn Easy Apply + Naukri + Indeed."
@@ -1291,6 +1297,11 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                             messages_sent_session += 1
                             batch_msg_count += 1
                             _sync_linkedin_outreach_to_cloud(conn)
+                            try:
+                                from src.services.system_alerter import clear_system_alert
+                                clear_system_alert("LinkedIn")
+                            except Exception:
+                                pass
 
                             if messages_sent_session == 1 or batch_msg_count in (1, batch_target):
                                 send_discord_cycle_note(
@@ -1329,6 +1340,18 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
 
             except Exception as iter_e:
                 print(f"[Cycle:Error] Iteration error caught: {iter_e}")
+                try:
+                    from src.services.system_alerter import send_system_alert
+                    send_system_alert(
+                        platform="LinkedIn",
+                        issue_type="runtime_error",
+                        summary="LinkedIn master cycle encountered a browser/CDP or runtime error.",
+                        fix_steps="Check Ridealong (`http://127.0.0.1:8083`) and ensure Chrome/Ridealong is awake (`ridealong status`). Auto-retrying in 20s.",
+                        details=str(iter_e),
+                        cooldown_minutes=30,
+                    )
+                except Exception:
+                    pass
                 time.sleep(20)
 
 if __name__ == "__main__":
