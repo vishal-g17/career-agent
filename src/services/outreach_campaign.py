@@ -30,7 +30,7 @@ def set_followups_enabled(enabled: bool, updated_by: str = "cli") -> Dict[str, A
     }
     FOLLOWUP_CONTROL_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
     return state
-from .cold_mailer import compose_cold_email, send_cold_email_smtp, get_sender_credentials
+from .cold_mailer import compose_cold_email, send_cold_email_smtp, get_sender_credentials, get_last_sent_message_id
 from .email_verifier import verify_email
 from .exclusion_filter import is_excluded, is_bounced_or_discarded, record_bounced_email
 from ..db import database
@@ -214,14 +214,15 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
                 counters["attempted"] += 1
                 with database.get_connection() as c:
                     if ok:
+                        new_mid = get_last_sent_message_id()
                         c.execute(
                             """
                             UPDATE outreach_leads 
                             SET status = 'sent', sender_email = ?, first_sent_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP,
-                                last_subject = ?
+                                last_subject = ?, last_message_id = COALESCE(?, last_message_id)
                             WHERE id = ?
                             """,
-                            (sender_addr, mail_data["subject"], l_id),
+                            (sender_addr, mail_data["subject"], new_mid, l_id),
                         )
                         counters["sent"] += 1
                         today_counts[sender_addr.lower()] = today_counts.get(sender_addr.lower(), 0) + 1
@@ -431,19 +432,29 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
                     "🔗 https://www.linkedin.com/in/vshal-g007"
                 )
 
-            ok = send_cold_email_smtp(email_addr, subject, body, sender_email=sender_email)
+            orig_msg_id = (lead.get("last_message_id") or "").strip() or None
+            ok = send_cold_email_smtp(
+                email_addr,
+                subject,
+                body,
+                sender_email=sender_email,
+                in_reply_to=orig_msg_id,
+                references=orig_msg_id,
+            )
             with db_lock:
                 if ok:
+                    new_mid = get_last_sent_message_id() or orig_msg_id
                     today_counts[s_key] = today_counts.get(s_key, 0) + 1
                     with database.get_connection() as c:
                         if stage == 1:
                             c.execute(
                                 """
                                 UPDATE outreach_leads 
-                                SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, last_subject = ?
+                                SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP,
+                                    last_subject = ?, last_message_id = COALESCE(?, last_message_id)
                                 WHERE id = ? AND status = 'sent'
                                 """,
-                                (subject, lead_id),
+                                (subject, new_mid, lead_id),
                             )
                             counters["fu1"] += 1
                             print(f"[FollowUp #1] ✅ Sent via {sender_email} ({today_counts[s_key]}/{cap}) -> {name} ({company}, {email_addr})")

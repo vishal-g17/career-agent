@@ -1,10 +1,17 @@
 import os
 import re
 import smtplib
+import threading
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Dict, Any, List, Optional, Tuple
+
+_MAIL_THREAD_LOCAL = threading.local()
+
+
+def get_last_sent_message_id() -> Optional[str]:
+    return getattr(_MAIL_THREAD_LOCAL, "last_sent_message_id", None)
 from ..engine.llm import generate_text
 from .email_verifier import verify_email
 from ..db import database
@@ -201,12 +208,17 @@ def send_cold_email_smtp(
 
     try:
         from email.mime.application import MIMEApplication
+        from email.utils import make_msgid
+        sender_domain = sender.split("@")[-1] if "@" in sender else "gmail.com"
+        generated_msgid = make_msgid(domain=sender_domain)
+
         msg = MIMEMultipart()
         msg["From"] = f"Vishal Gupta <{sender}>"
         msg["To"] = recipient_email
         if verified_cc:
             msg["Cc"] = ", ".join(verified_cc)
         msg["Subject"] = subject
+        msg["Message-ID"] = generated_msgid
         if in_reply_to:
             msg["In-Reply-To"] = in_reply_to.strip()
         if references:
@@ -241,7 +253,8 @@ def send_cold_email_smtp(
                 server.sendmail(sender, envelope_rcpts, msg.as_string())
 
         print(f"[ColdMailer] [{sender}] Successfully dispatched email to {recipient_email}" + (f" (cc: {verified_cc})" if verified_cc else ""))
-        database.log_event("COLD_EMAIL", "INFO", f"Email sent from {sender} to {recipient_email}", {"subject": subject, "cc": verified_cc})
+        database.log_event("COLD_EMAIL", "INFO", f"Email sent from {sender} to {recipient_email}", {"subject": subject, "cc": verified_cc, "message_id": generated_msgid})
+        _MAIL_THREAD_LOCAL.last_sent_message_id = generated_msgid
         return True
     except smtplib.SMTPResponseException as smtp_err:
         if smtp_err.smtp_code == 550 and ("limit exceeded" in str(smtp_err).lower() or "sending limit" in str(smtp_err).lower()):
