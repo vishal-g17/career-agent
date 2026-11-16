@@ -90,17 +90,46 @@ BIG_LEADER_HEADLINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-RECRUITER_OR_HM_HEADLINE_RE = re.compile(
-    r"\b(recruiter|talent acquisition|talent partner|hiring|hr\b|hrbp|people partner|headhunter|staffing|"
-    r"product manager|group pm|senior pm|lead pm|product lead|analytics|data science|business intelligence|"
+RECRUITER_HEADLINE_ONLY_RE = re.compile(
+    r"\b(recruiter|talent acquisition|talent partner|hr\b|hrbp|people partner|headhunter|staffing)\b",
+    re.IGNORECASE,
+)
+
+HM_OR_PM_HEADLINE_RE = re.compile(
+    r"\b(product manager|group pm|senior pm|lead pm|product lead|analytics|data science|business intelligence|"
     r"engineering manager|tech lead|strategy|growth|category)\b",
+    re.IGNORECASE,
+)
+
+# Detects ANY job-opening / hiring announcement post so we NEVER interact with irrelevant job openings (e.g. HRBP, Sales, Java)
+BROAD_HIRING_POST_RE = re.compile(
+    r"\b(hiring|we're hiring|we are hiring|looking for|open role|openings?\b|join our team|walk-in|"
+    r"urgent(?:ly)? hiring|job alert|apply now|share (?:your )?(?:cv|resume)|send (?:your )?(?:cv|resume)|"
+    r"mail (?:your )?(?:cv|resume)|dm (?:your )?(?:cv|resume))\b",
+    re.IGNORECASE,
+)
+
+STRICT_MY_ROLES_RE = re.compile(
+    r"\b(apm|associate product manager|product manager|product analyst|tech product analyst|"
+    r"business analyst|data analyst|operations analyst|growth analyst|strategy analyst|"
+    r"associate category manager|category analyst|founder's office|chief of staff|business operations|bizops)\b",
+    re.IGNORECASE,
+)
+
+SENIOR_YOE_ONLY_RE = re.compile(
+    r"\b(?:[4-9]|1\d)\s*\+?\s*(?:-\s*\d+\s*)?(?:yrs?|years?)\b",
+    re.IGNORECASE,
+)
+
+JUNIOR_YOE_ALLOWED_RE = re.compile(
+    r"\b(?:0|1|2)\s*(?:-\s*[1-4]|\+)?\s*(?:yrs?|years?)\b|\bfresher|\bnew grad|\bapm\b",
     re.IGNORECASE,
 )
 
 GENUINE_DOMAIN_BODY_RE = re.compile(
     r"\b(product|startup|revenue|growth|conversion|funnel|retention|metrics|analytics|data|sql|python|"
     r"ai\b|llm|agent|automation|quick commerce|ecommerce|d2c|fintech|saas|b2b|consumer|marketplace|"
-    r"pricing|margin|unit economics|distribution|founder|execution|roadmap|user|customer|hiring)\b",
+    r"pricing|margin|distribution|founder|execution|roadmap)\b",
     re.IGNORECASE,
 )
 
@@ -123,6 +152,22 @@ BANNED_COMMENT_OPENERS = (
     "absolutely agree",
     "amazing post",
     "nice post",
+    "true that",
+    "agreed",
+)
+
+# Hard block corporate/AI buzzwords so no comment ever sounds ChatGPT-written
+BANNED_AI_BUZZWORDS_RE = re.compile(
+    r"\b("
+    r"critical|essential|crucial|vital|pivotal|imperative|paramount|"
+    r"operational velocity|rapid growth|align|alignment|aligning|synergy|holistic|robust|scalable|"
+    r"ecosystem|paradigm|landscape|leverage|leveraging|foster|fostering|cultivate|"
+    r"resonates|underscores|testament|delve|game-changer|seamless|seamlessly|empower|"
+    r"transformative|cutting-edge|north star|value proposition|actionable|strategic|"
+    r"optimize|optimization|cross-functional|stakeholders|trajectory|unprecedented|navigating|nuanced|"
+    r"unit economics"
+    r")\b",
+    re.IGNORECASE,
 )
 
 # Extracts ONLY the visited profile's own body (stripping <aside> & "More profiles for you" recommendations)
@@ -650,42 +695,52 @@ def _classify_post_for_engagement(
     if "/in/" in (author_url or "") and is_excluded(name=author_name, headline=author_headline):
         return None
 
-    is_hiring = any(re.search(pat, body, re.IGNORECASE) for pat in HIRING_TRIGGERS)
-    has_target_role = bool(TARGET_ROLES_RE.search(body))
-    is_foreign_only = bool(FOREIGN_ONLY_RE.search(combined)) and ("india" not in combined.lower() and "remote" not in combined.lower())
+    is_any_hiring_post = bool(BROAD_HIRING_POST_RE.search(body))
+    matched_my_role = STRICT_MY_ROLES_RE.search(body)
+    is_foreign_only = bool(FOREIGN_ONLY_RE.search(combined)) and (
+        "india" not in combined.lower() and "remote" not in combined.lower()
+    )
     if is_foreign_only:
         return None
 
+    # IRONCLAD RULE: If this is ANY hiring / job-opening post, ONLY engage if it explicitly hires
+    # for Vishal's target roles (APM / PM / Product Analyst / Business Analyst / Data Analyst / Founder's Office)
+    # AND is NOT locked to 4+ years senior experience! Skip HRBP, Sales, Java, Design, etc. 100%!
+    if is_any_hiring_post:
+        if not matched_my_role:
+            return None
+        if SENIOR_YOE_ONLY_RE.search(body) and not JUNIOR_YOE_ALLOWED_RE.search(body):
+            return None
+        # Also skip "Senior Product Manager" / "Director of Product" / "VP Product" if no APM/Analyst/0-2 yr role
+        if re.search(r"\b(senior product manager|group product manager|director of product|vp of product|head of product)\b", body, re.IGNORECASE):
+            if not re.search(r"\b(apm|associate product manager|product analyst|business analyst|data analyst|founder's office)\b", body, re.IGNORECASE):
+                return None
+        return ("hiring_decision_maker", True)
+
+    # In Stage 2 (keyword post search), ONLY interact with relevant target-role hiring posts above
+    if source_stage != "personal_feed":
+        return None
+
     is_big_leader = bool(BIG_LEADER_HEADLINE_RE.search(author_headline)) or (
-        "/company/" in (author_url or "") and reaction_count >= 50
+        "/company/" in (author_url or "") and reaction_count >= 80
     )
-    is_recruiter_or_hm = bool(RECRUITER_OR_HM_HEADLINE_RE.search(author_headline))
+    is_recruiter = bool(RECRUITER_HEADLINE_ONLY_RE.search(author_headline))
+    is_hm_or_pm = bool(HM_OR_PM_HEADLINE_RE.search(author_headline))
     has_domain_substance = bool(GENUINE_DOMAIN_BODY_RE.search(body))
     asks_question = "?" in body[-220:]
 
-    # 1. Direct Hiring Post for Target Product/Analytics/Founder's Office Roles
-    if is_hiring and has_target_role:
-        return ("hiring_decision_maker", True)
+    # Recruiters posting non-hiring career/tech updates: Like ONLY (never leave random comments on HR topics!)
+    if is_recruiter and has_domain_substance:
+        return ("recruiter_like_only", False)
 
-    # In Stage 2 (keyword post search), ONLY interact with relevant hiring/HM/founder posts
-    if source_stage != "personal_feed":
-        if (is_big_leader or is_recruiter_or_hm) and has_domain_substance and len(body) >= 120:
-            return ("recruiter_or_hm", random.random() < 0.45)
-        return None
+    # Big Person / Founder / CXO / VP / Director / Product Leader sharing real Product/Startup/Data thoughts
+    if (is_big_leader or is_hm_or_pm) and has_domain_substance and len(body) >= 120:
+        wants_cmt = True if asks_question else (random.random() < 0.35)
+        return ("big_person_leader" if is_big_leader else "hm_product_leader", wants_cmt)
 
-    # 2. Big Person / Founder / CXO / VP / Director / High-Traction Industry Post
-    if is_big_leader and (has_domain_substance or reaction_count >= 40):
-        wants_cmt = True if asks_question else (random.random() < 0.60)
-        return ("big_person_leader", wants_cmt)
-
-    # 3. Recruiter / Talent Acquisition / Hiring Manager / Senior PM / Analytics Leader
-    if is_recruiter_or_hm and (has_domain_substance or is_hiring):
-        wants_cmt = True if (asks_question or is_hiring) else (random.random() < 0.45)
-        return ("recruiter_or_hm", wants_cmt)
-
-    # 4. High-signal viral / genuine domain post in Personal Feed
-    if has_domain_substance and len(body) >= 140 and (reaction_count >= 25 or asks_question):
-        wants_cmt = asks_question and (random.random() < 0.40)
+    # Viral genuine product/startup/tech breakdown in Personal Feed -> Like (and rare comment only on sharp questions)
+    if has_domain_substance and len(body) >= 150 and reaction_count >= 50:
+        wants_cmt = asks_question and (random.random() < 0.25)
         return ("genuine_domain_post", wants_cmt)
 
     return None
@@ -699,77 +754,82 @@ def _generate_contextual_comment(
     has_email_in_post: bool = False,
 ) -> Optional[str]:
     """
-    Generates a concise, authentic, post-specific 1-2 sentence LinkedIn comment in Vishal's voice,
-    scrubbed of AI tells and strictly checked against confidentiality & anti-cliché rules.
+    Generates a short, crisp, genuinely human 1-sentence LinkedIn comment (7-16 words, <=115 chars).
+    Zero AI corporate jargon.
     """
     first_name = author_name.split()[0] if author_name else ""
+    is_company_page = any(
+        w in author_name.lower() for w in ("diary", "inc", "labs", "tech", "india", "ai", "media", "ventures", "capital")
+    )
 
     if category == "hiring_decision_maker":
-        mode_instructions = (
-            "MODE: Relevant Hiring Post.\n"
-            "- Write a crisp, respectful, high-signal 1-2 sentence comment (20 to 38 words).\n"
-            "- Reference the exact role/team or problem area mentioned in the post.\n"
-            "- Briefly note hands-on experience in product & analytics (B.Tech CSE/Math from NSUT Delhi, immediate/15-day joiner) "
-            + (
-                "and mention sending across your CV to the email shared."
-                if has_email_in_post
-                else "and note you'd love to connect or share your CV for the role."
-            )
-            + "\n- NEVER include phone numbers, email addresses, or URLs in the public comment."
-        )
-    else:
-        mode_instructions = (
-            "MODE: Genuine Industry / Leadership / Product Engagement (NOT a job pitch).\n"
-            "- DO NOT ask for a job, referral, or mention being on the job market.\n"
-            "- Write 1-2 sharp, natural sentences (18 to 40 words) reacting directly to a SPECIFIC point, metric, trade-off, or question in the post.\n"
-            "- Bring a grounded product/analytics/operator perspective (e.g., unit economics, funnel reality, execution bottleneck, data vs vanity metrics, distribution).\n"
-            "- NEVER start with generic praise like 'Great post', 'Spot on', 'Totally agree', 'Well said', 'Love this', 'Thanks for sharing', or 'This resonates'. Start directly with the insight!"
-        )
+        role_m = STRICT_MY_ROLES_RE.search(post_body)
+        role_label = role_m.group(0) if role_m else "Product/Analyst"
+        name_prefix = f"Hi {first_name}, " if (first_name and not is_company_page and len(first_name) >= 3) else ""
+        if has_email_in_post:
+            return f"{name_prefix}super keen on the {role_label} role, just sent my resume over mail!"[:120]
+        return f"{name_prefix}very interested in the {role_label} role (NSUT '26, 1 yr product & analytics exp). Would love to connect!"[:125]
 
     system_prompt = (
-        "You are writing a real LinkedIn comment for Vishal Gupta (B.Tech Mathematics & Computing from NSUT Delhi; "
-        "pragmatic product & analytics builder).\n\n"
-        f"{mode_instructions}\n\n"
-        "STRICT OUTPUT RULES:\n"
-        "1. Output ONLY the raw comment text (1-2 sentences, max 250 characters).\n"
-        "2. NO hashtags (#), NO emojis, NO bullet points, NO em-dashes (—), NO surrounding quotation marks.\n"
-        "3. NEVER name any past or current employer of Vishal.\n"
-        "4. Sound like a sharp human peer typing naturally on LinkedIn, never an AI assistant."
+        "Write ONE short, casual, crisp human comment on a LinkedIn post (strictly 7 to 15 words, max 105 characters).\n"
+        "Persona: 23-yr-old product & analytics builder (casual, sharp, everyday spoken English).\n\n"
+        "HARD RULES:\n"
+        "1. Strictly ONE short sentence, 7 to 15 words MAX (under 105 chars).\n"
+        "2. Use plain everyday words a real person texts ('honestly', 'usually', 'hard part', 'wild', 'way harder', 'makes sense', 'real leak').\n"
+        "3. BANNED AI/CORPORATE WORDS: critical, essential, crucial, align, velocity, rapid growth, unit economics, ecosystem, leverage, seamless, holistic, strategic, optimize, actionable, resonates, spot on, great post, thanks for sharing, totally agree.\n"
+        "4. React to ONE specific detail/number in the post. Do NOT summarize the post.\n"
+        "5. NO hashtags, NO emojis, NO em-dashes, NO quotes, NO employer names, NO job asking.\n\n"
+        "GOOD EXAMPLES OF REAL HUMAN COMMENTS:\n"
+        "- Wild that Blinkit is already 5x food delivery revenue, Hyperpure feels like the next sleeper bet.\n"
+        "- Week-one habit matters way more than signup volume for retention.\n"
+        "- Fixing boring catalog and pricing bugs usually moves conversion faster than a new UI.\n"
+        "- Most dashboards miss this because power users hide the new-user drop-off."
     )
 
     user_prompt = (
-        f"Post Author: {author_name} ({author_headline or 'Industry Leader'})\n"
-        f"Author First Name (optional to use only if natural): {first_name}\n"
-        f"Post Content:\n{post_body[:1400]}\n\n"
-        "Write the 1-2 sentence LinkedIn comment now:"
+        f"Author: {author_name}\n"
+        f"Post:\n{post_body[:1100]}\n\n"
+        "Reply with ONLY the 1 short human sentence (7-15 words):"
     )
 
-    try:
-        raw = llm.generate_text(user_prompt, system_instruction=system_prompt, temperature=0.65, max_tokens=180)
-    except Exception as e:
-        print(f"[FeedInteract] LLM comment skip: {e}")
-        return None
+    for attempt in range(2):
+        try:
+            raw = llm.generate_text(
+                user_prompt,
+                system_instruction=system_prompt,
+                temperature=0.55 if attempt == 0 else 0.7,
+                max_tokens=70,
+            )
+        except Exception as e:
+            print(f"[FeedInteract] LLM comment skip: {e}")
+            return None
 
-    if not raw:
-        return None
+        if not raw:
+            continue
 
-    # Scrub invisible unicode, em-dashes, and AI slop words
-    cleaned, _, _, _ = scrubber.clean_and_score(raw.strip())
-    cleaned = cleaned.strip().strip('"').strip("'").strip("“”")
-    cleaned = re.sub(r"#\w+", "", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned, _, _, _ = scrubber.clean_and_score(raw.strip())
+        cleaned = cleaned.splitlines()[0].strip().strip('"').strip("'").strip("“”")
+        cleaned = re.sub(r"#\w+", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    if len(cleaned) < 30 or len(cleaned) > 280:
-        return None
-    low = cleaned.lower()
-    if any(low.startswith(op) for op in BANNED_COMMENT_OPENERS):
-        return None
-    if has_forbidden_company(cleaned):
-        return None
-    if "http://" in low or "https://" in low or "@" in cleaned or "{{" in cleaned or "[" in cleaned:
-        return None
+        words = cleaned.split()
+        low = cleaned.lower()
+        if len(words) < 6 or len(words) > 19:
+            continue
+        if len(cleaned) < 28 or len(cleaned) > 120:
+            continue
+        if any(low.startswith(op) for op in BANNED_COMMENT_OPENERS):
+            continue
+        if BANNED_AI_BUZZWORDS_RE.search(cleaned):
+            continue
+        if has_forbidden_company(cleaned):
+            continue
+        if "http://" in low or "https://" in low or "@" in cleaned or "{{" in cleaned or "[" in cleaned:
+            continue
 
-    return cleaned
+        return cleaned
+
+    return None
 
 
 def _interact_with_visible_posts(
@@ -1051,10 +1111,10 @@ def _extract_leads_from_text(main_text: str, source_label: str, seen_snippets: O
         if len(clean) < 80:
             continue
 
-        is_hiring = any(re.search(pat, clean, re.IGNORECASE) for pat in HIRING_TRIGGERS)
-        has_role = TARGET_ROLES_RE.search(clean)
+        is_hiring = bool(BROAD_HIRING_POST_RE.search(clean))
+        has_role = STRICT_MY_ROLES_RE.search(clean)
 
-        if is_hiring or has_role:
+        if is_hiring and has_role:
             snippet_key = re.sub(r"\W+", " ", clean[:90].lower()).strip()
             if snippet_key in seen:
                 continue
