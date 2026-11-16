@@ -487,9 +487,9 @@ def apply_to_indeed_job(job_url: str, role_title: str = "Product Analyst") -> Di
                         active_apply_page.wait_for_load_state("domcontentloaded")
                         active_apply_page.wait_for_timeout(2000)
 
-                # Step through SmartApply wizard (up to 12 steps; wait through 'Preparing review' spinner!)
+                # Step through SmartApply wizard (up to 18 steps; wait through 'Preparing review' spinner!)
                 idle_waits = 0
-                for step_idx in range(12):
+                for step_idx in range(18):
                     if _is_cloudflare_or_captcha_gate(active_apply_page):
                         print("[IndeedApply] Anti-bot/CAPTCHA gate encountered inside SmartApply; stopping cleanly.")
                         result["status"] = "captcha_gate"
@@ -590,7 +590,7 @@ def apply_to_indeed_job(job_url: str, role_title: str = "Product Analyst") -> Di
                         if apply_anyway is not None:
                             apply_anyway.click()
                             active_apply_page.wait_for_timeout(2500)
-                        if active_apply_page.url == prev_u and step_idx >= 8:
+                        if active_apply_page.url == prev_u and step_idx >= 14:
                             break
                     else:
                         idle_waits += 1
