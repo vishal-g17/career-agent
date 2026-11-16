@@ -199,20 +199,21 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
 
 def _fill_smartapply_step(page: Page, role_title: str, answered_log: List[Dict[str, str]]) -> None:
     """Fills visible fields on the current Indeed SmartApply wizard step."""
-    # 1. Resume selection or upload
+    # 1. Resume selection or upload (NEVER click 'Select file' button; Vishal_Gupta_Resume.pdf is pre-uploaded)
     try:
-        resume_card = page.locator(
-            '[data-testid="ResumeSelectionCard"], [data-testid*="resume-selection"], '
-            'label:has-text("Vishal"), div[role="radio"]:has-text("Resume")'
-        ).first
-        if resume_card.count() > 0 and resume_card.is_visible():
-            resume_card.click(timeout=1500)
-            page.wait_for_timeout(400)
-        else:
-            fi = page.locator('input[type="file"]').first
-            if fi.count() > 0 and os.path.exists(RESUME_PATH):
-                # Only upload if no resume card is already selected
-                if page.locator('[aria-checked="true"], input[type="radio"]:checked').count() == 0:
+        already_checked = page.locator('input[type="radio"]:checked, [role="radio"][aria-checked="true"]').count() > 0
+        if not already_checked:
+            resume_card = page.locator(
+                '[data-testid="FileResumeCardHeader-title"], '
+                '[data-testid="ResumeSelectionCard"], '
+                'label:has-text("Vishal"), div[role="radio"]:has-text("Vishal")'
+            ).first
+            if resume_card.count() > 0 and resume_card.is_visible():
+                resume_card.click(timeout=1500)
+                page.wait_for_timeout(400)
+            else:
+                fi = page.locator('input[type="file"]').first
+                if fi.count() > 0 and os.path.exists(RESUME_PATH):
                     fi.set_input_files(RESUME_PATH)
                     page.wait_for_timeout(2000)
     except Exception:
@@ -524,17 +525,34 @@ def apply_to_indeed_job(job_url: str, role_title: str = "Product Analyst") -> Di
 
                     _fill_smartapply_step(active_apply_page, role_title, result["questions_answered"])
 
-                    # Check for final Submit button first
-                    submit_btn = active_apply_page.locator(
-                        'button:has-text("Submit your application"), '
-                        'button:has-text("Submit application"), '
-                        'button[data-testid*="submit-application"]'
-                    ).first
-                    if submit_btn.count() > 0 and submit_btn.is_visible() and submit_btn.is_enabled():
+                    def _pick_real_smartapply_btn(selector: str):
+                        for cand in active_apply_page.locator(selector).all():
+                            try:
+                                tid = (cand.get_attribute("data-testid") or "").lower()
+                                if tid.startswith("hp-"):
+                                    continue
+                                if not cand.is_visible() or not cand.is_enabled():
+                                    continue
+                                box = cand.bounding_box()
+                                if not box or box.get("width", 0) < 24 or box.get("height", 0) < 20:
+                                    continue
+                                return cand
+                            except Exception:
+                                continue
+                        return None
+
+                    # Check for final Submit button first (strictly ignoring hp-* trap buttons)
+                    submit_btn = _pick_real_smartapply_btn(
+                        'button[data-testid="submit-application-button"], '
+                        'button:not([data-testid^="hp-"]):has-text("Submit your application"), '
+                        'button:not([data-testid^="hp-"]):has-text("Submit application"), '
+                        'button[data-testid*="submit-application"]:not([data-testid^="hp-"])'
+                    )
+                    if submit_btn is not None:
                         idle_waits = 0
                         submit_btn.scroll_into_view_if_needed(timeout=2000)
                         submit_btn.click()
-                        for _ in range(3):
+                        for _ in range(4):
                             active_apply_page.wait_for_timeout(3000)
                             if _is_cloudflare_or_captcha_gate(active_apply_page):
                                 result["status"] = "captcha_gate"
@@ -545,28 +563,31 @@ def apply_to_indeed_job(job_url: str, role_title: str = "Product Analyst") -> Di
                                 "/post-apply" in post_u
                                 or "your application has been submitted" in post_txt
                                 or "application submitted" in post_txt
+                                or "you have applied" in post_txt
                                 or "we've sent your application" in post_txt
                             ):
                                 result["applied"] = True
                                 result["status"] = "applied"
                                 return result
 
-                    # Otherwise click Continue / Review your application
-                    cont_btn = active_apply_page.locator(
-                        'button:has-text("Continue"), '
-                        'button:has-text("Review your application"), '
-                        'button[data-testid*="continue"]'
-                    ).first
-                    if cont_btn.count() > 0 and cont_btn.is_visible() and cont_btn.is_enabled():
+                    # Otherwise click real Continue / Review your application button (never hp-continue-button-*)
+                    cont_btn = _pick_real_smartapply_btn(
+                        'button[data-testid="continue-button"], '
+                        'button:not([data-testid^="hp-"]):has-text("Review your application"), '
+                        'button:not([data-testid^="hp-"]):has-text("Continue"), '
+                        'button[data-testid*="continue"]:not([data-testid^="hp-"])'
+                    )
+                    if cont_btn is not None:
                         idle_waits = 0
                         prev_u = active_apply_page.url
                         cont_btn.scroll_into_view_if_needed(timeout=2000)
                         cont_btn.click()
                         active_apply_page.wait_for_timeout(3200)
-                        apply_anyway = active_apply_page.locator(
-                            'button:has-text("Apply anyway"), button:has-text("Continue applying")'
-                        ).first
-                        if apply_anyway.count() > 0 and apply_anyway.is_visible():
+                        apply_anyway = _pick_real_smartapply_btn(
+                            'button:not([data-testid^="hp-"]):has-text("Apply anyway"), '
+                            'button:not([data-testid^="hp-"]):has-text("Continue applying")'
+                        )
+                        if apply_anyway is not None:
                             apply_anyway.click()
                             active_apply_page.wait_for_timeout(2500)
                         if active_apply_page.url == prev_u and step_idx >= 8:
