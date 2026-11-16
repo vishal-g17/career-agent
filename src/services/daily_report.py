@@ -154,6 +154,29 @@ def collect_daily_metrics(target_date_ist: Optional[str] = None) -> Dict[str, An
     except Exception:
         pass
 
+    feed_likes_today = 0
+    feed_likes_total = 0
+    feed_comments_today = 0
+    feed_comments_total = 0
+    try:
+        r_td = cur.execute(
+            """
+            SELECT COALESCE(SUM(liked), 0), COALESCE(SUM(commented), 0)
+            FROM linkedin_feed_interactions
+            WHERE date(interacted_at, '+5 hours', '30 minutes') = ?
+            """,
+            (day_str,),
+        ).fetchone()
+        if r_td:
+            feed_likes_today, feed_comments_today = int(r_td[0] or 0), int(r_td[1] or 0)
+        r_all = cur.execute(
+            "SELECT COALESCE(SUM(liked), 0), COALESCE(SUM(commented), 0) FROM linkedin_feed_interactions"
+        ).fetchone()
+        if r_all:
+            feed_likes_total, feed_comments_total = int(r_all[0] or 0), int(r_all[1] or 0)
+    except Exception:
+        pass
+
     conn.close()
 
     ats_today = (
@@ -209,6 +232,10 @@ def collect_daily_metrics(target_date_ist: Optional[str] = None) -> Dict[str, An
             "dms_today": li_today,
             "dms_all_time": li_total,
             "invites_today": invites_today,
+            "feed_likes_today": feed_likes_today,
+            "feed_likes_all_time": feed_likes_total,
+            "feed_comments_today": feed_comments_today,
+            "feed_comments_all_time": feed_comments_total,
         },
     }
 
@@ -239,8 +266,9 @@ def format_daily_report_markdown(base_cloud_url: str = "", header_prefix: str = 
             f"• **Follow-Ups Sent Today:** `{em['fu1_today'] + em['fu2_today']}` (`FU1: {em['fu1_today']}`, `FU2: {em['fu2_today']}`)",
             f"• **Inbound Recruiter Replies:** `{em['replies_all_time']}` total tracked (`+{em['replies_today']}` timestamped today)",
             f"• **Bounces Auto-Purged (6s Wiper):** `{em['bounces_today']}` wiped today (`{em['bounces_all_time']}` blocked all-time) | **Pending Queue:** `{em['pending']}`",
-            f"\n### 🤝 3. LinkedIn Outreach Today: **{li['dms_today']} DMs + CV** (`{li['dms_all_time']}` All-Time)",
+            f"\n### 🤝 3. LinkedIn Outreach & Feed Engagement Today: **{li['dms_today']} DMs + CV** (`{li['dms_all_time']}` All-Time)",
             f"• **1st-Degree Referrals / HR DMs Sent Today:** `{li['dms_today']}` (`{li['dms_all_time']}` total)",
+            f"• **Feed Post Engagement Today:** `{li['feed_likes_today']}` Likes • `{li['feed_comments_today']}` Contextual Comments (`{li['feed_likes_all_time']}` likes / `{li['feed_comments_all_time']}` comments total)",
             f"• **New Connection Invites Sent Today:** `{li['invites_today']}`",
         ]
     )

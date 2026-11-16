@@ -126,6 +126,7 @@ def build_dashboard_html() -> str:
                 <div>🎯 <strong>Jobs Today ({dm['jobs_today_total']}):</strong> Instahyre <code>{tp['Instahyre']}</code> &bull; Direct ATS <code>{tp['Direct ATS (Greenhouse/Lever/Ashby)']}</code> &bull; LinkedIn <code>{tp['LinkedIn Jobs']}</code> &bull; Naukri <code>{tp['Naukri']}</code> &bull; Indeed <code>{tp['Indeed']}</code></div>
                 <div>✉️ <strong>Emails Today ({em['sent_today_total']}):</strong> Fresh <code>{em['fresh_today']}</code> (NSUT <code>{em['nsut_today']}</code>, Gmail <code>{em['gmail_today']}</code>) &bull; Follow-Ups <code>{em['fu1_today'] + em['fu2_today']}</code></div>
                 <div>🤝 <strong>LinkedIn DMs Today:</strong> <code>{li['dms_today']}</code></div>
+                <div>👍 <strong>Feed Engagement Today:</strong> <code>{li.get('feed_likes_today', 0)}</code> Likes &bull; <code>{li.get('feed_comments_today', 0)}</code> Comments</div>
             </div>
         </div>
         """

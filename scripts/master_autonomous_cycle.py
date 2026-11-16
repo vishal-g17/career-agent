@@ -881,6 +881,8 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     sync_control_with_cloud(stage_info=f"Batch #{batch_num} Random Cool-Down ({wait1_mins}m) + Connection Test", force=True)
     if not _sleep_respecting_control(pre_test_s):
         return
+    if page is None or page.is_closed():
+        page = context.pages[0] if context.pages else context.new_page()
     if is_linkedin_logged_out(page):
         _handle_linkedin_logout(page)
         return
@@ -920,8 +922,8 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
         return
 
     send_discord_cycle_note(
-        f"🔄 **Stage B — Randomized Feed & Post Hunt (~{feed_dur_mins} min)**\n"
-        "• Extracting recruiter emails strictly from post bodies (ignoring comments) with randomized scroll cadence."
+        f"🔄 **Stage B — Randomized Feed Hunt & Post Engagement (~{feed_dur_mins} min)**\n"
+        "• Selectively liking & commenting on Founder / HM / Recruiter posts + extracting recruiter emails strictly from post bodies."
     )
     run_feed_scan_stage(conn=conn, duration_minutes=feed_dur_mins)
 
