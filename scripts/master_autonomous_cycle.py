@@ -22,6 +22,7 @@ from src.services.linkedin_control import (
     sync_control_with_cloud,
     set_linkedin_enabled,
     is_linkedin_logged_out,
+    extract_linkedin_restriction_notice,
 )
 from scripts.scrape_connection_emails import scrape_connection_contacts
 
@@ -64,6 +65,14 @@ def init_master_db():
             requested_at DATETIME,
             accepted_at DATETIME,
             cold_msg_sent_at DATETIME
+        )
+    ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS linkedin_profile_safety_cache (
+            username TEXT PRIMARY KEY,
+            is_safe INTEGER NOT NULL DEFAULT 1,
+            reason TEXT,
+            checked_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -162,12 +171,12 @@ def refill_connections_queue(page, conn, min_needed: int = 50, max_scrolls: int 
         except Exception:
             pass
 
-        # Step 2: Direct pagination into 1st-degree people search (`network=["F"]`) to reach unmessaged connections across all 4,250+ connections in seconds!
+        # Step 2: Gentle pagination into 1st-degree people search (`network=["F"]`) — max 4 pages per refill with 4.5-8s pauses
         if added < needed_to_add:
             cur.execute("SELECT (SELECT COUNT(*) FROM linkedin_connections_outreach) + (SELECT COUNT(*) FROM linkedin_connections_queue)")
             total_processed = cur.fetchone()[0] or 0
             base_page = max(1, min(90, (total_processed // 15) + 1))
-            candidate_pages = list(range(base_page, min(100, base_page + 12))) + random.sample(range(15, 98), k=6)
+            candidate_pages = (list(range(base_page, min(100, base_page + 3))) + random.sample(range(15, 98), k=2))[:4]
 
             for pg_num in candidate_pages:
                 if added >= needed_to_add:
@@ -175,13 +184,16 @@ def refill_connections_queue(page, conn, min_needed: int = 50, max_scrolls: int 
                 p_url = f"https://www.linkedin.com/search/results/people/?network=%5B%22F%22%5D&page={pg_num}"
                 try:
                     page.goto(p_url, wait_until="domcontentloaded", timeout=20000)
-                    page.wait_for_timeout(2400)
+                    page.wait_for_timeout(random.randint(4500, 8000))
+                    if is_linkedin_logged_out(page):
+                        _handle_linkedin_logout(page)
+                        break
                     batch_new = _ingest_extracted(page.evaluate(js_extract))
                     added += batch_new
                     print(f"[Queue:Refill] 1st-degree page {pg_num}: +{batch_new} ({added}/{needed_to_add} queued).")
                 except Exception as pe:
                     if "429" in str(pe):
-                        time.sleep(60)
+                        time.sleep(90)
                         break
 
         print(f"[Queue:Refill] Replenished queue with {added} fresh eligible connections.")
@@ -235,25 +247,50 @@ def _mark_linkedin_user_excluded(username: str, reason: str) -> None:
 
 def verify_linkedin_profile_safe(page, username: str) -> bool:
     """
-    Fail-closed full LinkedIn profile scanner:
-    Opens /in/{username}/, scrolls so Top Card + Experience render, and checks the
-    candidate's full Experience & employer badges against FORBIDDEN_COMPANIES.
-    Catches people who omit their employer name from their 1-line headline!
+    SQLite-cached fail-closed LinkedIn profile scanner:
+    Checks `linkedin_profile_safety_cache` first so no /in/{username}/ profile is ever loaded twice.
+    When uncached, opens /in/{username}/ once, scrolls naturally, checks full Experience & employer
+    badges against FORBIDDEN_COMPANIES, and caches the result permanently.
     """
+    uname_l = (username or "").strip().lower()
+    if not uname_l:
+        return False
+    try:
+        db_c = sqlite3.connect(DB_PATH, timeout=15.0)
+        cached = db_c.execute(
+            "SELECT is_safe FROM linkedin_profile_safety_cache WHERE username = ?",
+            (uname_l,),
+        ).fetchone()
+        db_c.close()
+        if cached is not None:
+            return bool(cached[0])
+    except Exception:
+        pass
+
     profile_url = f"https://www.linkedin.com/in/{username}/"
     try:
         page.goto(profile_url, wait_until="domcontentloaded", timeout=22000)
-        page.wait_for_timeout(2600)
+        page.wait_for_timeout(random.randint(2800, 4200))
         if is_linkedin_logged_out(page):
             _handle_linkedin_logout(page)
             return False
         page.mouse.wheel(0, 1400)
-        page.wait_for_timeout(1300)
+        page.wait_for_timeout(random.randint(1400, 2200))
         profile_txt = page.evaluate(JS_EXTRACT_PROFILE_BODY_ONLY) or ""
         if len(profile_txt.strip()) < 80:
             print(f"[ExclusionGuard] ⚠️ Profile text unverified for {username}; failing closed (skipping).")
             return False
         forbidden_hit = has_forbidden_company(profile_txt)
+        try:
+            db_c = sqlite3.connect(DB_PATH, timeout=15.0)
+            db_c.execute(
+                "INSERT OR REPLACE INTO linkedin_profile_safety_cache (username, is_safe, reason, checked_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                (uname_l, 0 if forbidden_hit else 1, forbidden_hit or "SAFE"),
+            )
+            db_c.commit()
+            db_c.close()
+        except Exception:
+            pass
         if forbidden_hit:
             print(f"[ExclusionGuard] 🛑 BLOCKED {username}: matched restricted employer in full profile/Experience!")
             _mark_linkedin_user_excluded(username, forbidden_hit)
@@ -268,13 +305,19 @@ def verify_linkedin_profile_safe(page, username: str) -> bool:
 # 1b. TURBO 1ST-DEGREE MESSAGE SENDER
 # -------------------------------------------------------------
 def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
-    """Fast, humanized direct pitch with attached PDF CV and Drive link reusing page."""
-    # 0. Fast DB check BEFORE browser navigation so duplicates/exclusions never even open compose
+    """Human-paced direct pitch with attached PDF CV and Drive link — checks compose thread BEFORE loading /in/ profile!"""
+    uname_l = (username or "").strip().lower()
+    profile_already_cached_safe = False
+    # 0. Fast DB check BEFORE browser navigation so duplicates/exclusions never open any page
     try:
-        db_conn = sqlite3.connect(DB_PATH)
+        db_conn = sqlite3.connect(DB_PATH, timeout=15.0)
         db_cur = db_conn.cursor()
         db_cur.execute("SELECT status FROM linkedin_connections_outreach WHERE id = ?", (username,))
         existing = db_cur.fetchone()
+        cache_row = db_cur.execute(
+            "SELECT is_safe FROM linkedin_profile_safety_cache WHERE username = ?",
+            (uname_l,),
+        ).fetchone()
         db_conn.close()
         if existing and existing[0] == "excluded":
             print(f"[ExclusionGuard] 🛑 {username} already marked excluded; skipping.")
@@ -282,60 +325,31 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         if existing and existing[0] == "sent":
             print(f"[Cycle:1stDegree] Prior pitch already sent to {username}; skipping duplicate.")
             return False
+        if cache_row is not None:
+            if not bool(cache_row[0]):
+                print(f"[ExclusionGuard] 🛑 {username} cached as restricted employer; skipping without loading profile.")
+                return False
+            profile_already_cached_safe = True
     except Exception:
         pass
 
-    # MANDATORY FULL-PROFILE EXPERIENCE CHECK (prevents messaging anyone at restricted employers even when omitted from headline!)
-    if not verify_linkedin_profile_safe(page, username):
-        return False
-
     compose_url = f"https://www.linkedin.com/messaging/compose/?recipient={username}"
     try:
+        # 1. Open messaging compose FIRST so already-pitched threads NEVER trigger an /in/{username}/ profile fetch!
         try:
             page.goto(compose_url, wait_until="domcontentloaded", timeout=20000)
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(random.randint(2400, 3600))
             if is_linkedin_logged_out(page):
                 _handle_linkedin_logout(page)
                 return False
         except Exception as e:
             err_str = str(e)
             if "ERR_HTTP_RESPONSE_CODE_FAILURE" in err_str or "429" in err_str:
-                # Differentiate between a non-connection 429/404 and a real session block
-                is_real_rate_limit = False
-                try:
-                    test_page = page.context.new_page()
-                    resp = test_page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=8000)
-                    if resp and resp.status == 429:
-                        is_real_rate_limit = True
-                    test_page.close()
-                except Exception:
-                    pass
-
-                if is_real_rate_limit:
-                    print(f"[Cycle:RateLimit] Global LinkedIn session 429 throttle detected. Cooling down for 150s...")
-                    time.sleep(150)
-                else:
-                    print(f"[Cycle:1stDegree] {username} is not a 1st-degree connection or direct compose is closed. Skipping without cooldown.")
+                print(f"[Cycle:1stDegree] {username} direct compose unavailable ({err_str[:60]}). Skipping gently.")
             return False
 
         # Check if OUR AGENT has sent a prior outreach pitch to this person
         has_agent_sent_prior_pitch = False
-        other_person_replied = False
-
-        # 1. Database check: did our agent record a sent message to this username?
-        try:
-            db_conn = sqlite3.connect(DB_PATH)
-            db_cur = db_conn.cursor()
-            db_cur.execute("SELECT status, sent_at FROM linkedin_connections_outreach WHERE id = ? AND status = 'sent'", (username,))
-            db_record = db_cur.fetchone()
-            db_conn.close()
-            if db_record:
-                has_agent_sent_prior_pitch = True
-        except Exception:
-            pass
-
-        # 2. Live chat text check: inspect ONLY the active thread message list (NEVER 'main', which includes left-sidebar inbox previews!)
-        chat_text = ""
         try:
             chat_container = page.locator('.msg-s-message-list, .msg-s-message-list-container').first
             if chat_container.count() > 0 and chat_container.is_visible():
@@ -345,15 +359,19 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         except Exception:
             pass
 
-        # 3. Check if recipient has already replied
-        try:
-            past_events = page.locator('.msg-s-message-list__event, .msg-s-event-listitem').all()
-            if past_events:
-                last_event_text = past_events[-1].inner_text().lower()
-                if "vishal" not in last_event_text[:40] and len(last_event_text) > 10:
-                    other_person_replied = True
-        except Exception:
-            pass
+        if has_agent_sent_prior_pitch:
+            print(f"[Cycle:1stDegree] Prior pitch already in chat with {username}; recording & skipping without /in/ profile fetch.")
+            try:
+                db_c = sqlite3.connect(DB_PATH, timeout=15.0)
+                db_c.execute(
+                    "INSERT OR IGNORE INTO linkedin_connections_outreach (id, name, headline, status, sent_at) VALUES (?, ?, '', 'sent', CURRENT_TIMESTAMP)",
+                    (username, first_name),
+                )
+                db_c.commit()
+                db_c.close()
+            except Exception:
+                pass
+            return False
 
         # Composer check - wait up to 8s for React to mount the messaging box
         composer = page.locator('div[role="textbox"], .msg-form__contenteditable').first
@@ -362,13 +380,20 @@ def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
         except Exception:
             return False
 
-        # E4 Rule Directive: NEVER skip or exclude connections due to past chat or replies.
-        # If agent previously sent a pitch -> send follow-up update.
-        # Otherwise -> send standard primary pitch to all.
-
-        if has_agent_sent_prior_pitch:
-            print(f"[Cycle:1stDegree] Prior pitch already sent to {username}; skipping duplicate.")
-            return False
+        # 2. MANDATORY FULL-PROFILE EXPERIENCE CHECK (runs ONLY when uncached AND chat has no prior pitch!)
+        if not profile_already_cached_safe:
+            if not verify_linkedin_profile_safe(page, username):
+                return False
+            page.goto(compose_url, wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(random.randint(2200, 3200))
+            if is_linkedin_logged_out(page):
+                _handle_linkedin_logout(page)
+                return False
+            composer = page.locator('div[role="textbox"], .msg-form__contenteditable').first
+            try:
+                composer.wait_for(state="visible", timeout=8000)
+            except Exception:
+                return False
 
         # Attach PDF CV
         file_input = page.locator('input.msg-form__attachment-upload-input[accept*=".pdf"], .msg-form input[type="file"]').last
@@ -809,18 +834,32 @@ def sync_new_outreach_leads_to_cloud_vm(conn) -> int:
 
 
 def _handle_linkedin_logout(page) -> None:
-    """Hard-stops all LinkedIn automation on logout/checkpoint until user logs back in or restarts via CLI/#prompt."""
+    """Hard-stops all LinkedIn automation on logout/checkpoint/restriction until user logs back in or restarts via CLI/#prompt."""
     cur_url = getattr(page, "url", "") if page else ""
-    print(f"[Cycle:LogoutGuard] 🛑 LinkedIn logout/checkpoint detected ({cur_url})! Hard-stopping all LinkedIn automation.")
+    restr_notice = extract_linkedin_restriction_notice(page)
+    if restr_notice:
+        print(f"[Cycle:LogoutGuard] 🛑 LinkedIn restriction detected ({restr_notice})! Unloading tab & hard-stopping LinkedIn.")
+        try:
+            if page and not page.is_closed():
+                page.goto("about:blank")
+        except Exception:
+            pass
+    else:
+        print(f"[Cycle:LogoutGuard] 🛑 LinkedIn logout/checkpoint detected ({cur_url})! Hard-stopping all LinkedIn automation.")
     set_linkedin_enabled(False, reason="linkedin_logged_out", updated_by="auto_logout_guard")
     try:
         from src.services.system_alerter import send_system_alert
+        summary_msg = (
+            f"LinkedIn temporary restriction notice: {restr_notice} — all LinkedIn tasks paused immediately."
+            if restr_notice
+            else "LinkedIn logged out or hit a security checkpoint — all LinkedIn tasks safely paused."
+        )
         send_system_alert(
             platform="LinkedIn",
-            issue_type="logged_out",
-            summary="LinkedIn logged out or hit a security checkpoint — all LinkedIn tasks safely paused.",
-            fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back into LinkedIn (the daemon auto-resumes as soon as login completes, or reply `start linkedin` in `#prompt`).",
-            details=cur_url,
+            issue_type="temporarily_restricted" if restr_notice else "logged_out",
+            summary=summary_msg,
+            fix_steps="Wait for any stated restriction timestamp before signing back into LinkedIn in Ridealong (`http://127.0.0.1:8083`). Naukri, Indeed, Instahyre, and Cold Email continue uninterrupted.",
+            details=f"{restr_notice} | {cur_url}".strip(" |"),
             cooldown_minutes=30,
         )
     except Exception:
@@ -919,23 +958,24 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
     3. Random Wait #3 (1.5–5m) + Randomized LinkedIn Jobs Apply (6–12m, strict receipt verification).
     4. Random Cool-Down (1.5–4.5m) before starting the next randomized message batch.
     """
-    wait1_mins = round(random.uniform(3.0, 9.0), 1)
-    feed_gap_mins = round(random.uniform(1.0, 3.0), 1)
-    feed_dur_mins = round(random.uniform(5.0, 9.0), 1)
-    jobs_gap_mins = round(random.uniform(1.0, 3.0), 1)
-    jobs_dur_mins = random.randint(8, 13)
-    jobs_max_apps = random.randint(6, 10)
-    end_gap_mins = round(random.uniform(1.5, 3.5), 1)
+    wait1_mins = round(random.uniform(4.5, 9.5), 1)
+    feed_gap_mins = round(random.uniform(1.5, 3.5), 1)
+    feed_dur_mins = round(random.uniform(5.0, 8.5), 1)
+    jobs_gap_mins = round(random.uniform(1.5, 3.5), 1)
+    jobs_dur_mins = random.randint(7, 11)
+    jobs_max_apps = random.randint(4, 7)
+    end_gap_mins = round(random.uniform(2.0, 4.0), 1)
 
     print("\n" + "="*70)
     print(
         f"🎲 BATCH #{batch_num} COMPLETE -> RANDOMIZED ANTI-PATTERN SCHEDULE:\n"
-        f"  • Gap #1 + Connection Test: ~{wait1_mins}m (<20m) | Feed Gap: ~{feed_gap_mins}m -> Feed Hunt: ~{feed_dur_mins}m\n"
+        f"  • Gap #1 + Connection Test (max 2): ~{wait1_mins}m | Feed Gap: ~{feed_gap_mins}m -> Feed Hunt: ~{feed_dur_mins}m\n"
         f"  • Jobs Gap: ~{jobs_gap_mins}m -> Jobs Apply: ~{jobs_dur_mins}m | Pre-Batch Breather: ~{end_gap_mins}m"
     )
     print("="*70)
 
-    # 1. Random Gap (<20 min) + Connection Limit Test
+    # 1. Random Gap (<20 min) + Gentle Connection Limit Test (capped at max 2 invites per inter-batch so /in/ loads never burst!)
+    MAX_INVITES_PER_BATCH = 2
     pre_test_s = wait1_mins * 60.0 * random.uniform(0.45, 0.7)
     post_test_s = (wait1_mins * 60.0) - pre_test_s
     print(f"[InterBatch:Wait1] Resting randomly for {pre_test_s/60.0:.1f}m before testing connection limit...")
@@ -948,17 +988,16 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
         _handle_linkedin_logout(page)
         return
 
-    print("[ConnectionLimitCheck] Testing 1 connection invite during <20m randomized window...")
+    print("[ConnectionLimitCheck] Testing connection invite (max 2 per batch, 95-155s apart)...")
     res = discover_and_send_poc_invitation(page, context, conn)
     if res is True:
         sent_invites = 1
-        invite_window_end = time.time() + max(post_test_s, random.uniform(300, 660))
         send_discord_cycle_note(
             "🎉 **Connection Limit Check: ALLOWED!**\n"
-            f"• Invitation #1 sent; continuing with random `48–115s` gaps during this randomized window."
+            f"• Invitation #1 sent; capped gently at max `{MAX_INVITES_PER_BATCH}` invites per batch (`95–155s` human gap)."
         )
-        while time.time() < invite_window_end - 50:
-            if not _sleep_respecting_control(random.uniform(48, 115)):
+        while sent_invites < MAX_INVITES_PER_BATCH:
+            if not _sleep_respecting_control(random.uniform(95.0, 155.0)):
                 return
             r = discover_and_send_poc_invitation(page, context, conn)
             if r is True:
@@ -967,7 +1006,9 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
                 print(f"[ConnectionLimitCheck] Limit reached after {sent_invites} invite(s).")
                 break
             else:
-                time.sleep(random.uniform(8, 18))
+                break
+        if post_test_s > 30 and not _sleep_respecting_control(min(post_test_s, 120.0)):
+            return
     else:
         print(f"[InterBatch:Wait1] Connection limit still active -> completing remaining {post_test_s/60.0:.1f}m of <20m random gap...")
         if not _sleep_respecting_control(post_test_s):
@@ -1072,10 +1113,16 @@ def run_inter_batch_activities(page, context, conn, batch_num: int = 1):
 # MASTER CONTINUOUS CYCLE (1 TASK AT A TIME SEQUENTIAL LOOP)
 # -------------------------------------------------------------
 IST = timezone(timedelta(hours=5, minutes=30))
-DAILY_MAX_1ST_DEGREE = 80       # Paced safely across the day
+DAILY_MAX_1ST_DEGREE = 45       # Gentle human cap across 10 AM - 11 PM IST
 
-# LinkedIn Temporary Suspension Cooldown (12 Nov 10:37 AM PST = 13 Nov 00:07 AM IST)
-LINKEDIN_SUSPEND_UNTIL = datetime(2026, 11, 13, 0, 7, 0, tzinfo=IST)
+# LinkedIn Temporary Restriction Cooldown:
+# Nov 16, 2026 5:05 AM PST (UTC-8) = 6:35 PM IST Today + 15m safety cushion = 6:50 PM IST Today (16 Nov 2026)
+LINKEDIN_SUSPEND_UNTIL = datetime(2026, 11, 16, 18, 50, 0, tzinfo=IST)
+
+def is_naukri_indeed_window() -> bool:
+    """Naukri + Indeed run 10:00 AM - 11:00 PM IST independently even while LinkedIn is cooling down."""
+    now_ist = datetime.now(IST)
+    return 10 <= now_ist.hour < 23
 
 def is_in_active_window() -> bool:
     """Returns True during the user-mandated window: 10:00 AM to 11:00 PM IST, and strictly after any temporary suspension."""
@@ -1118,9 +1165,9 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
     conn = sqlite3.connect(DB_PATH)
 
     print("\n" + "="*80)
-    print("🚀 LINKEDIN RANDOMIZED ANTI-PATTERN SEQUENTIAL MASTER CYCLE")
+    print("🚀 LINKEDIN GENTLE ANTI-PROFILE-SPIKE SEQUENTIAL MASTER CYCLE")
     print("Operating Window: 10:00 AM - 11:00 PM IST")
-    print("Cycle: [Stage A] 8-11 Msgs (<2m random gap) -> [<20m Random Gap + Connect Test] -> [Random Gap + Feed Hunt] -> [Random Gap + Jobs] -> Repeat")
+    print("Cycle: [Stage A] 5-7 Msgs (95-185s gap, cached /in/ checks) -> [Random Gap + Max 2 Connect] -> [Zero-Profile Feed Hunt] -> [Jobs + Naukri + Indeed]")
     print("="*80 + "\n")
 
     with sync_playwright() as p:
@@ -1132,69 +1179,36 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
             WHERE date(sent_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
         ''')
         init_today = init_cur.fetchone()[0]
-        batch_target = random.randint(8, 11)
-        batch_msg_count = init_today % 10
+        batch_target = random.randint(5, 7)
+        batch_msg_count = init_today % 6
         if batch_msg_count >= batch_target:
             batch_target = batch_msg_count + 1
-        batch_num = (init_today // 10) + 1
+        batch_num = (init_today // 6) + 1
         browser = None
         context = None
         page = None
         paused_logged = False
         last_naukri_standalone_ts = 0.0
+        last_suspend_log_ts = 0.0
+        last_login_probe_ts = 0.0
 
         while True:
             try:
                 now_ist = datetime.now(IST)
 
-                # 0. Cloud-Synced Manual / Logout Stop Check (#prompt or CLI)
-                ctl_state = sync_control_with_cloud()
-                if not ctl_state.get("linkedin_enabled", True):
-                    # Auto-resume immediately once Vishal completes LinkedIn login + 2FA in Ridealong
-                    if ctl_state.get("reason") in ("linkedin_logged_out", "waiting_for_login"):
-                        try:
-                            if browser is None or not browser.is_connected():
-                                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
-                                context = browser.contexts[0]
-                            has_li_at = any(
-                                c.get("name") == "li_at" and c.get("value")
-                                for c in context.cookies()
-                            )
-                            if has_li_at:
-                                probe_pg = context.new_page()
-                                try:
-                                    probe_pg.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=18000)
-                                    probe_pg.wait_for_timeout(2000)
-                                    feed_ok = not is_linkedin_logged_out(probe_pg)
-                                finally:
-                                    if len(context.pages) > 1:
-                                        probe_pg.close()
-                                if feed_ok:
-                                    if page is not None and not page.is_closed():
-                                        try:
-                                            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=18000)
-                                        except Exception:
-                                            pass
-                                    print("[Cycle:Control] 🟢 Verified live LinkedIn Feed session! Auto-starting LinkedIn cycle now!")
-                                    set_linkedin_enabled(True, reason="active", updated_by="auto_resume_on_login")
-                                    try:
-                                        from src.services.system_alerter import clear_system_alert
-                                        clear_system_alert("LinkedIn")
-                                    except Exception:
-                                        pass
-                                    send_discord_cycle_note(
-                                        "🟢 **LinkedIn Login Verified — Automation Started Automatically!**\n"
-                                        "• Resuming Stage A (1st-Degree DMs) + Feed Recruiter Scan + LinkedIn Easy Apply + Naukri + Indeed."
-                                    )
-                                    paused_logged = False
-                                    continue
-                        except Exception:
-                            pass
-                    if not paused_logged:
-                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Naukri + Indeed continue independently during 10 AM - 11 PM IST!")
-                        paused_logged = True
-                    # Keep Naukri + Indeed running every ~30m during 10 AM - 11 PM IST even while LinkedIn is paused/logged out (unless manual emergency_stop)
-                    if is_in_active_window() and ctl_state.get("reason") != "emergency_stop" and (time.time() - last_naukri_standalone_ts) >= 1800.0:
+                # 0A. STRICT HARD COOLDOWN BEFORE ANY LINKEDIN COOKIE/FEED PROBE!
+                # Zero linkedin.com requests until strictly >= LINKEDIN_SUSPEND_UNTIL (6:50 PM IST = 5:05 AM PST + 15m cushion).
+                if now_ist < LINKEDIN_SUSPEND_UNTIL:
+                    ctl_state = sync_control_with_cloud()
+                    mins_left = max(1, int((LINKEDIN_SUSPEND_UNTIL - now_ist).total_seconds() // 60) + 1)
+                    until_str = LINKEDIN_SUSPEND_UNTIL.strftime('%I:%M %p IST (%d %b)')
+                    if (time.time() - last_suspend_log_ts) >= 300.0:
+                        last_suspend_log_ts = time.time()
+                        print(
+                            f"[Cycle:Suspension] ⏸️ LinkedIn hard-paused until {until_str} (5:05 AM PST + 15m safety cushion | ~{mins_left}m remaining). "
+                            "Zero LinkedIn requests; Naukri + Indeed active!"
+                        )
+                    if is_naukri_indeed_window() and ctl_state.get("reason") != "emergency_stop" and (time.time() - last_naukri_standalone_ts) >= 1800.0:
                         last_naukri_standalone_ts = time.time()
                         try:
                             nk_py = (
@@ -1207,7 +1221,95 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                             subprocess.run([sys.executable, "-u", "-c", nk_py], timeout=600)
                         except Exception as snke:
                             print(f"[Cycle:NaukriIndeedStandalone] Note: {snke}")
-                    time.sleep(10)
+                    time.sleep(20)
+                    continue
+
+                # 0B. Cloud-Synced Manual / Logout / Post-Restriction Check (#prompt or CLI)
+                ctl_state = sync_control_with_cloud()
+                if not ctl_state.get("linkedin_enabled", True):
+                    # If the 5:05 AM PST (+15m buffer) cooldown has now elapsed, transition cleanly to waiting_for_login
+                    if ctl_state.get("reason") == "linkedin_restricted_until_505am_pst":
+                        ctl_state = set_linkedin_enabled(False, reason="waiting_for_login", updated_by="restriction_window_elapsed")
+                        try:
+                            if browser is None or not browser.is_connected():
+                                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
+                                context = browser.contexts[0]
+                            has_li_at_now = any(c.get("name") == "li_at" and c.get("value") for c in context.cookies())
+                        except Exception:
+                            has_li_at_now = False
+                        if not has_li_at_now:
+                            try:
+                                from src.services.system_alerter import send_system_alert
+                                send_system_alert(
+                                    platform="LinkedIn",
+                                    issue_type="ready_for_login_after_restriction",
+                                    summary="LinkedIn 5:05 AM PST restriction window (+15m buffer) has passed — safe to sign back in now!",
+                                    fix_steps="Open Ridealong (`http://127.0.0.1:8083`) -> sign back into `https://www.linkedin.com/login` (automation will auto-resume gently with anti-profile-spike pacing as soon as login completes).",
+                                    details="Cooldown completed at 06:50 PM IST (Nov 16).",
+                                    cooldown_minutes=60,
+                                )
+                            except Exception:
+                                pass
+
+                    # Auto-resume gently once Vishal completes LinkedIn login + 2FA in Ridealong (probe at most once per 60s, ONLY when li_at exists!)
+                    if ctl_state.get("reason") in ("linkedin_logged_out", "waiting_for_login") and (time.time() - last_login_probe_ts) >= 60.0:
+                        last_login_probe_ts = time.time()
+                        try:
+                            if browser is None or not browser.is_connected():
+                                browser = p.chromium.connect_over_cdp(RIDEALONG_CDP_ENDPOINT)
+                                context = browser.contexts[0]
+                            has_li_at = any(
+                                c.get("name") == "li_at" and c.get("value")
+                                for c in context.cookies()
+                            )
+                            if has_li_at:
+                                probe_pg = context.new_page()
+                                try:
+                                    probe_pg.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=18000)
+                                    probe_pg.wait_for_timeout(2500)
+                                    feed_ok = not is_linkedin_logged_out(probe_pg)
+                                finally:
+                                    if len(context.pages) > 1:
+                                        probe_pg.close()
+                                if feed_ok:
+                                    if page is not None and not page.is_closed():
+                                        try:
+                                            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=18000)
+                                        except Exception:
+                                            pass
+                                    print("[Cycle:Control] 🟢 Verified live LinkedIn Feed session! Auto-starting gentle LinkedIn cycle now!")
+                                    set_linkedin_enabled(True, reason="active", updated_by="auto_resume_on_login")
+                                    try:
+                                        from src.services.system_alerter import clear_system_alert
+                                        clear_system_alert("LinkedIn")
+                                    except Exception:
+                                        pass
+                                    send_discord_cycle_note(
+                                        "🟢 **LinkedIn Login Verified — Gentle Automation Resumed Automatically!**\n"
+                                        "• Active with anti-profile-spike pacing (`5–7` DMs/batch at `95–185s` gaps, SQLite-cached `/in/` checks, zero background feed `/in/` tabs) + Naukri + Indeed."
+                                    )
+                                    paused_logged = False
+                                    continue
+                        except Exception:
+                            pass
+                    if not paused_logged:
+                        print(f"[Cycle:Control] 🛑 LinkedIn automation STOPPED (reason: {ctl_state.get('reason')} | by: {ctl_state.get('updated_by')}). Naukri + Indeed continue independently during 10 AM - 11 PM IST!")
+                        paused_logged = True
+                    # Keep Naukri + Indeed running every ~30m during 10 AM - 11 PM IST even while LinkedIn is paused/logged out (unless manual emergency_stop)
+                    if is_naukri_indeed_window() and ctl_state.get("reason") != "emergency_stop" and (time.time() - last_naukri_standalone_ts) >= 1800.0:
+                        last_naukri_standalone_ts = time.time()
+                        try:
+                            nk_py = (
+                                f"import sys; sys.path.insert(0, {repr(str(PROJECT_ROOT))}); "
+                                "from scripts.run_naukri_batch import run_naukri_batch; "
+                                "from scripts.run_indeed_batch import run_indeed_batch; "
+                                "run_naukri_batch(limit=10); "
+                                "run_indeed_batch(limit=8)"
+                            )
+                            subprocess.run([sys.executable, "-u", "-c", nk_py], timeout=600)
+                        except Exception as snke:
+                            print(f"[Cycle:NaukriIndeedStandalone] Note: {snke}")
+                    time.sleep(15)
                     continue
                 if paused_logged:
                     print("[Cycle:Control] 🟢 LinkedIn automation RESUMED via control state!")
@@ -1219,14 +1321,10 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                         except Exception:
                             pass
 
-                # 1. Check Operating Window & Temporary Suspension
+                # 1. Check Operating Window
                 if not is_in_active_window():
                     now_str = now_ist.strftime('%I:%M %p IST')
-                    if now_ist < LINKEDIN_SUSPEND_UNTIL:
-                        until_str = LINKEDIN_SUSPEND_UNTIL.strftime('%I:%M %p IST (%d %b)')
-                        print(f"[Cycle:Suspension] LinkedIn temporarily suspended until {until_str}. Current: {now_str}. Sleeping safely...")
-                    else:
-                        print(f"[Cycle:Schedule] Current time {now_str} is outside 10:00 AM - 11:00 PM IST window. Resting safely...")
+                    print(f"[Cycle:Schedule] Current time {now_str} is outside 10:00 AM - 11:00 PM IST window. Resting safely...")
                     time.sleep(60)
                     continue
 
@@ -1261,17 +1359,17 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                 if start_inter_batch:
                     start_inter_batch = False
                     run_inter_batch_activities(page, context, conn, batch_num=max(1, batch_num - 1))
-                    batch_target = random.randint(8, 11)
+                    batch_target = random.randint(5, 7)
                     continue
 
                 sync_control_with_cloud(stage_info=f"Batch #{batch_num} Stage A ({batch_msg_count}/{batch_target} msgs | {daily_1st_sent} today)")
                 print(f"\n[Cycle:Heartbeat #{iteration_count} | {now_fmt}] Batch #{batch_num} ({batch_msg_count}/{batch_target}) | Today Sent: {daily_1st_sent}/{DAILY_MAX_1ST_DEGREE} | Queue: {queue_pending}")
 
-                # STAGE 0: Queue Check & Auto-Refill if low (scroll up to 300 passes so older connections past top 760 are reached!)
+                # STAGE 0: Queue Check & Gentle Auto-Refill if low
                 if queue_pending < 5:
-                    refill_connections_queue(page, conn, min_needed=30, max_scrolls=300)
+                    refill_connections_queue(page, conn, min_needed=25, max_scrolls=120)
 
-                # STAGE A: 1st-Degree Messaging (Randomized batch size & <2 min random gap, 1 task at a time)
+                # STAGE A: 1st-Degree Messaging (Gentle 5-7 batch size & 95-185s human gap, 1 task at a time)
                 if daily_1st_sent < DAILY_MAX_1ST_DEGREE:
                     cur.execute('''
                         SELECT id, name, headline FROM linkedin_connections_queue 
@@ -1314,22 +1412,23 @@ def run_master_cycle(interval_minutes: int = 1, start_inter_batch: bool = False)
                                 print(f"[Cycle:StageA] Completed {batch_msg_count}/{batch_target} messages in Batch #{batch_num}! Entering randomized inter-batch cycle...")
                                 run_inter_batch_activities(page, context, conn, batch_num=batch_num)
                                 batch_msg_count = 0
-                                batch_target = random.randint(8, 11)
+                                batch_target = random.randint(5, 7)
                                 batch_num += 1
                             else:
-                                # Randomized wait strictly under 2 minutes (42s - 115s)
-                                delay_s = random.uniform(42.0, 115.0)
-                                print(f"[Cycle:StageA] Random <2m gap: resting {int(delay_s)}s before Message {batch_msg_count + 1}/{batch_target}...")
+                                # Gentle human gap (95s - 185s) to prevent profile/compose bursts
+                                delay_s = random.uniform(95.0, 185.0)
+                                print(f"[Cycle:StageA] Gentle human gap: resting {int(delay_s)}s before Message {batch_msg_count + 1}/{batch_target}...")
                                 _sleep_respecting_control(delay_s)
                         else:
                             cur.execute("UPDATE linkedin_connections_queue SET status='skipped' WHERE id=?", (username,))
                             conn.commit()
-                            time.sleep(random.uniform(2.0, 5.5))
+                            # Never rapid-fire skips in 2-5s — rest 22-42s so LinkedIn never sees rapid back-to-back navigations!
+                            _sleep_respecting_control(random.uniform(22.0, 42.0))
                         continue
                     else:
                         print("[Cycle:StageA] Queue empty after refill attempt; running randomized inter-batch stages...")
                         run_inter_batch_activities(page, context, conn, batch_num=batch_num)
-                        batch_target = random.randint(8, 11)
+                        batch_target = random.randint(5, 7)
                         batch_num += 1
                         continue
                 else:

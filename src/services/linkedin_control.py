@@ -138,8 +138,29 @@ def sync_control_with_cloud(stage_info: str = None, force: bool = False) -> Dict
     return local_state
 
 
+def extract_linkedin_restriction_notice(page) -> str:
+    """Passively extracts any LinkedIn temporary restriction message/lift timestamp from the current page."""
+    if page is None:
+        return ""
+    try:
+        url_l = (page.url or "").lower()
+        if "linkedin.com" not in url_l:
+            return ""
+        body_txt = (page.locator("body").inner_text(timeout=2500) or "").strip()
+        low = body_txt.lower()
+        if "temporarily restricted" in low or "we restricted your account" in low:
+            for line in body_txt.splitlines():
+                ln = line.strip()
+                if "lifted on" in ln.lower() or "temporarily restricted" in ln.lower():
+                    return ln[:240]
+            return "LinkedIn account temporarily restricted."
+    except Exception:
+        pass
+    return ""
+
+
 def is_linkedin_logged_out(page) -> bool:
-    """Detects if LinkedIn session is logged out, hit authwall, or requires login/checkpoint."""
+    """Detects if LinkedIn session is logged out, hit authwall, or hit a checkpoint/temporary restriction."""
     if page is None:
         return False
     try:
@@ -149,6 +170,8 @@ def is_linkedin_logged_out(page) -> bool:
         if "linkedin.com" in url_l:
             login_input = page.locator('input[name="session_key"], input#username, form.login__form').first
             if login_input.count() > 0 and login_input.is_visible():
+                return True
+            if extract_linkedin_restriction_notice(page):
                 return True
     except Exception:
         pass

@@ -381,12 +381,18 @@ def sync_feed_interactions_to_cloud() -> None:
 
 def _verify_author_profile_safe(context, author_url: str) -> bool:
     """
-    Fail-closed full-profile Experience check for personal /in/{username}/ authors before
-    liking or commenting on their post, cached in SQLite so each author is checked once.
+    Zero-profile-spike safety check for /in/{username}/ authors before liking/commenting:
+    Checks URL slug + SQLite exclusion/safety tables (`linkedin_profile_safety_cache`,
+    `linkedin_connections_outreach`, `linkedin_connections_queue`) WITHOUT opening background
+    `/in/{username}/` tabs during feed scrolling (which triggers LinkedIn's profile-scraping detector).
+    Card-level text, headline, body, hrefs, aria-labels, and expanded text are already verified
+    against FORBIDDEN_COMPANIES in `_interact_with_visible_posts`.
     """
     if not author_url or "/in/" not in author_url:
-        # Company page (/company/...) — already checked via card text & company slug against FORBIDDEN_COMPANIES
-        return not bool(has_forbidden_company(author_url))
+        return not bool(has_forbidden_company(author_url or ""))
+
+    if has_forbidden_company(author_url):
+        return False
 
     m = re.search(r"/in/([^/?#]+)", author_url)
     if not m:
@@ -402,43 +408,25 @@ def _verify_author_profile_safe(context, author_url: str) -> bool:
             "SELECT is_safe FROM linkedin_profile_safety_cache WHERE username = ?",
             (username,),
         ).fetchone()
+        if row is not None and not bool(row[0]):
+            conn.close()
+            return False
+        for tbl in ("linkedin_connections_outreach", "linkedin_connections_queue"):
+            try:
+                ex_row = conn.execute(
+                    f"SELECT status, exclusion_reason FROM {tbl} WHERE lower(id) = ?",
+                    (username,),
+                ).fetchone()
+                if ex_row and (ex_row[0] == "excluded" or ex_row[1]):
+                    conn.close()
+                    return False
+            except Exception:
+                pass
         conn.close()
-        if row is not None:
-            return bool(row[0])
     except Exception:
         pass
 
-    prof_page = None
-    try:
-        prof_page = context.new_page()
-        prof_page.goto(f"https://www.linkedin.com/in/{username}/", wait_until="domcontentloaded", timeout=20000)
-        prof_page.wait_for_timeout(1800)
-        prof_page.mouse.wheel(0, 1200)
-        prof_page.wait_for_timeout(900)
-        prof_txt = prof_page.evaluate(JS_EXTRACT_PROFILE_BODY_ONLY) or ""
-        if len(prof_txt.strip()) < 40:
-            return False
-        hit = has_forbidden_company(prof_txt)
-        is_safe = 0 if hit else 1
-        conn = sqlite3.connect(DB_PATH, timeout=15.0)
-        conn.execute(
-            "INSERT OR REPLACE INTO linkedin_profile_safety_cache (username, is_safe, reason, checked_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-            (username, is_safe, hit or "SAFE"),
-        )
-        conn.commit()
-        conn.close()
-        if hit:
-            print(f"  🛑 [FeedInteract:Guard] Blocked interaction with {username} (restricted employer on profile).")
-            return False
-        return True
-    except Exception:
-        return False
-    finally:
-        if prof_page is not None:
-            try:
-                prof_page.close()
-            except Exception:
-                pass
+    return True
 
 
 def _extract_post_bodies_no_comments(page) -> str:
