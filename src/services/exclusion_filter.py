@@ -73,6 +73,22 @@ IRRELEVANT_PATTERNS = [
     r"\bcall center\b"
 ]
 
+def has_forbidden_company(text: str = "") -> str:
+    """
+    Strictly checks any profile text, Experience section, headline, or company string
+    against FORBIDDEN_COMPANIES. Uses word boundaries for short <=4 char tokens.
+    Returns exclusion reason if matched, else "".
+    """
+    low = (text or "").lower()
+    for fc in FORBIDDEN_COMPANIES:
+        if len(fc) <= 4:
+            if re.search(rf"\b{re.escape(fc)}\b", low, re.IGNORECASE):
+                return "E1_CONFIDENTIAL_COMPANY"
+        elif fc in low:
+            return "E1_CONFIDENTIAL_COMPANY"
+    return ""
+
+
 def is_excluded(name: str = "", headline: str = "", card_text: str = "") -> str:
     """
     Checks candidate/connection against strict exclusion filters E1, E2, E3.
@@ -83,12 +99,9 @@ def is_excluded(name: str = "", headline: str = "", card_text: str = "") -> str:
     full_text = f"{name} {headline} {card_text}".lower()
 
     # E1: Confidentiality / Former Employers (word-boundary for short <=4 char tokens to avoid matching 'economic'/'anomalies')
-    for fc in FORBIDDEN_COMPANIES:
-        if len(fc) <= 4:
-            if re.search(rf"\b{re.escape(fc)}\b", full_text, re.IGNORECASE):
-                return f"E1_CONFIDENTIAL_COMPANY_{fc.upper()}"
-        elif fc in full_text:
-            return f"E1_CONFIDENTIAL_COMPANY_{fc.upper()}"
+    e1 = has_forbidden_company(full_text)
+    if e1:
+        return e1
 
     # E2: Students / Juniors graduating AFTER 2026 (Grads till 2026 are allowed)
     for st in AFTER_26_JUNIOR_PATTERNS:

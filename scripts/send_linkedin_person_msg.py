@@ -26,7 +26,7 @@ from playwright.sync_api import sync_playwright
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.services.exclusion_filter import FORBIDDEN_COMPANIES
+from src.services.exclusion_filter import FORBIDDEN_COMPANIES, has_forbidden_company
 from src.services.linkedin_control import is_linkedin_logged_out
 
 DB_PATH = os.path.expanduser("~/.linkedin_agent.db")
@@ -276,7 +276,7 @@ def send_person_outreach(
 
             first_name = display_name.split()[0] if display_name else "there"
 
-            if not custom_message and any(fc in f"{display_name} {headline}".lower() for fc in FORBIDDEN_COMPANIES):
+            if not custom_message and has_forbidden_company(f"{display_name} {headline}"):
                 return {"ok": False, "action": "excluded", "message": "Target matches restricted company exclusion list."}
 
             # CASE 1: Custom exact message requested by user (e.g. "Hello pagal") -> send immediately!

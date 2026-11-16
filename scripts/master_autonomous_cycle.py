@@ -17,7 +17,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.services.easy_apply import apply_to_easy_apply_job
 from src.services.naukri_filler import apply_to_naukri_job
 from src.agents.feed_scanner import scan_personal_feed_for_jobs
-from src.services.exclusion_filter import is_excluded
+from src.services.exclusion_filter import is_excluded, has_forbidden_company
 from src.services.linkedin_control import (
     sync_control_with_cloud,
     set_linkedin_enabled,
@@ -169,10 +169,104 @@ def refill_connections_queue(page, conn, min_needed: int = 50, max_scrolls: int 
         return 0
 
 # -------------------------------------------------------------
-# 1. TURBO 1ST-DEGREE MESSAGE SENDER
+# 1. FULL-PROFILE EXPERIENCE & COMPANY EXCLUSION GUARD
+# -------------------------------------------------------------
+JS_EXTRACT_PROFILE_BODY_ONLY = """() => {
+    const root = document.querySelector('main') || document.body;
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll('aside').forEach(el => el.remove());
+    clone.querySelectorAll('section').forEach(sec => {
+        const txt = (sec.innerText || '').slice(0, 140).toLowerCase();
+        if (
+            txt.includes('more profiles for you') ||
+            txt.includes('people you may know') ||
+            txt.includes('people also viewed') ||
+            txt.includes('you might like') ||
+            txt.includes('explore premium')
+        ) {
+            sec.remove();
+        }
+    });
+    const aria = Array.from(clone.querySelectorAll('[aria-label], img[alt]'))
+        .map(e => (e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('alt') || ''))
+        .join(' ');
+    return (clone.innerText || '') + ' ' + aria;
+}"""
+
+
+def _mark_linkedin_user_excluded(username: str, reason: str) -> None:
+    try:
+        db_c = sqlite3.connect(DB_PATH, timeout=15.0)
+        db_c.execute(
+            "UPDATE linkedin_connections_queue SET status='excluded', exclusion_reason=? WHERE id=?",
+            (reason, username),
+        )
+        db_c.execute(
+            "UPDATE linkedin_connections_outreach SET status='excluded', exclusion_reason=? WHERE id=?",
+            (reason, username),
+        )
+        db_c.commit()
+        db_c.close()
+    except Exception:
+        pass
+
+
+def verify_linkedin_profile_safe(page, username: str) -> bool:
+    """
+    Fail-closed full LinkedIn profile scanner:
+    Opens /in/{username}/, scrolls so Top Card + Experience render, and checks the
+    candidate's full Experience & employer badges against FORBIDDEN_COMPANIES.
+    Catches people who omit their employer name from their 1-line headline!
+    """
+    profile_url = f"https://www.linkedin.com/in/{username}/"
+    try:
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=22000)
+        page.wait_for_timeout(2600)
+        if is_linkedin_logged_out(page):
+            _handle_linkedin_logout(page)
+            return False
+        page.mouse.wheel(0, 1400)
+        page.wait_for_timeout(1300)
+        profile_txt = page.evaluate(JS_EXTRACT_PROFILE_BODY_ONLY) or ""
+        if len(profile_txt.strip()) < 80:
+            print(f"[ExclusionGuard] ⚠️ Profile text unverified for {username}; failing closed (skipping).")
+            return False
+        forbidden_hit = has_forbidden_company(profile_txt)
+        if forbidden_hit:
+            print(f"[ExclusionGuard] 🛑 BLOCKED {username}: matched restricted employer in full profile/Experience!")
+            _mark_linkedin_user_excluded(username, forbidden_hit)
+            return False
+        return True
+    except Exception as pe:
+        print(f"[ExclusionGuard] ⚠️ Could not verify profile {username} ({pe}); failing closed.")
+        return False
+
+
+# -------------------------------------------------------------
+# 1b. TURBO 1ST-DEGREE MESSAGE SENDER
 # -------------------------------------------------------------
 def turbo_send_1st_degree(page, username: str, first_name: str) -> bool:
     """Fast, humanized direct pitch with attached PDF CV and Drive link reusing page."""
+    # 0. Fast DB check BEFORE browser navigation so duplicates/exclusions never even open compose
+    try:
+        db_conn = sqlite3.connect(DB_PATH)
+        db_cur = db_conn.cursor()
+        db_cur.execute("SELECT status FROM linkedin_connections_outreach WHERE id = ?", (username,))
+        existing = db_cur.fetchone()
+        db_conn.close()
+        if existing and existing[0] == "excluded":
+            print(f"[ExclusionGuard] 🛑 {username} already marked excluded; skipping.")
+            return False
+        if existing and existing[0] == "sent":
+            print(f"[Cycle:1stDegree] Prior pitch already sent to {username}; skipping duplicate.")
+            return False
+    except Exception:
+        pass
+
+    # MANDATORY FULL-PROFILE EXPERIENCE CHECK (prevents messaging anyone at restricted employers even when omitted from headline!)
+    if not verify_linkedin_profile_safe(page, username):
+        return False
+
     compose_url = f"https://www.linkedin.com/messaging/compose/?recipient={username}"
     try:
         try:
@@ -318,6 +412,17 @@ def send_poc_request(page, username: str, full_name: str, custom_note: str = "")
 
         # Remove chat bubbles
         page.evaluate('() => document.querySelectorAll(".msg-overlay-container, .msg-overlay-list-bubble").forEach(el => el.remove())')
+
+        # Full-profile Experience & employer badge exclusion check before clicking Connect!
+        page.mouse.wheel(0, 1200)
+        page.wait_for_timeout(1000)
+        prof_txt = page.evaluate(JS_EXTRACT_PROFILE_BODY_ONLY) or ""
+        if has_forbidden_company(prof_txt):
+            print(f"[ExclusionGuard] 🛑 BLOCKED 2nd-degree Connect for {username}: matched restricted employer on profile!")
+            _mark_linkedin_user_excluded(username, "E1_CONFIDENTIAL_COMPANY")
+            return False
+        page.evaluate("() => window.scrollTo(0, 0)")
+        page.wait_for_timeout(400)
 
         # 1. Look for top-card Connect button
         connect_btn = page.locator('main section:first-of-type button:has-text("Connect")').first
@@ -532,6 +637,8 @@ def run_followup_cycle(page, conn, max_followups: int = 3) -> int:
     print(f"[Cycle:Followup] Found {len(candidates)} candidates for 48h follow-up.")
     followed_up = 0
     for username, name in candidates:
+        if not verify_linkedin_profile_safe(page, username):
+            continue
         first_name = name.split()[0] if name else "there"
         compose_url = f"https://www.linkedin.com/messaging/compose/?recipient={username}"
         try:
