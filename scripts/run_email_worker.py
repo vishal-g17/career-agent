@@ -33,19 +33,20 @@ def run_continuous_email_worker(batch_size: int = 20, pause_between_batches: int
                 print(f"[EmailWorker:ReplyScanNote] {re_err}")
 
             res = send_outreach_batch(batch_size=batch_size, sender_mode="rotate")
-            fu_res = process_pending_followups(max_followups=15) if fu_active else {"followup_1_sent": 0, "followup_2_sent": 0, "due_remaining": 0}
+            fu_res = process_pending_followups(max_followups=25) if fu_active else {"followup_1_sent": 0, "followup_2_sent": 0, "due_remaining": 0}
+            fu_sent_now = fu_res.get("followup_1_sent", 0) + fu_res.get("followup_2_sent", 0)
             stats = get_campaign_stats()
             print(
                 f"[EmailWorker:Pass #{pass_num}] Complete: Fresh Sent {res['sent']}, "
-                f"Follow-ups ({'ON' if fu_active else 'PAUSED'}): FU1={fu_res['followup_1_sent']}, FU2={fu_res['followup_2_sent']} | "
+                f"Follow-ups ({'ON' if fu_active else 'PAUSED'}): FU1={fu_res['followup_1_sent']}, FU2={fu_res['followup_2_sent']} (Due rem: {fu_res.get('due_remaining', 0)}) | "
                 f"Total Sent: {stats.get('sent_total', 0)}, Replied: {stats.get('replied', 0)}, Pending: {stats.get('pending', 0)}"
             )
 
-            if res.get("daily_cap_reached"):
+            if res.get("daily_cap_reached") and fu_sent_now == 0:
                 print("[EmailWorker] Daily cap (500 Gmail + 1,500 NSUT) reached for today IST. Resting 10 minutes...")
                 time.sleep(600)
-            elif stats.get('pending', 0) == 0 and (not fu_active or fu_res.get("due_remaining", 0) == 0):
-                print("[EmailWorker] Standing by (Pending=0, Follow-ups paused/clear). Resting 2 minutes...")
+            elif stats.get('pending', 0) == 0 and (not fu_active or fu_res.get("due_remaining", 0) == 0 or fu_sent_now == 0):
+                print("[EmailWorker] Standing by (Pending=0, Follow-ups clear/capped for active senders). Resting 2 minutes...")
                 time.sleep(120)
             else:
                 batch_wait = round(random.uniform(5.0, 19.5), 1)

@@ -108,7 +108,7 @@ def collect_daily_metrics(target_date_ist: Optional[str] = None) -> Dict[str, An
     ).fetchone()[0]
 
     total_active_emails = cur.execute(
-        "SELECT count(*) FROM outreach_leads WHERE status IN ('sent', 'replied', 'unresponsive')"
+        "SELECT count(*) FROM outreach_leads WHERE status IN ('sent', 'replied', 'unresponsive', 'closed_no_opening')"
     ).fetchone()[0]
     pending_emails = cur.execute("SELECT count(*) FROM outreach_leads WHERE status = 'pending'").fetchone()[0]
     total_replies = cur.execute("SELECT count(*) FROM outreach_leads WHERE status = 'replied'").fetchone()[0]

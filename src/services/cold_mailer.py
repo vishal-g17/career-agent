@@ -153,18 +153,32 @@ Vishal Gupta
         "body": body
     }
 
-def send_cold_email_smtp(recipient_email: str, subject: str, body: str, sender_email: Optional[str] = None) -> bool:
+def send_cold_email_smtp(
+    recipient_email: str,
+    subject: str,
+    body: str,
+    sender_email: Optional[str] = None,
+    cc: Optional[List[str]] = None,
+    in_reply_to: Optional[str] = None,
+    references: Optional[str] = None,
+) -> bool:
     """
-    Sends email via Google SMTP (SSL 465) from either Gmail or NSUT Google Workspace.
-    Automatically runs DNS MX verification and strictly prevents sending to Magicpin or Lifelong.
+    Sends email via Google SMTP (SSL 465 / STARTTLS 587) from either Gmail or NSUT Google Workspace.
+    Automatically runs DNS MX verification and strictly prevents sending to excluded employers.
+    Supports optional CC recipients and native RFC-2822 threading headers (In-Reply-To / References).
     """
-    clean_recip = recipient_email.strip().lower()
+    from .exclusion_filter import FORBIDDEN_COMPANIES
 
-    # Hard guardrail against emailing Magicpin or Lifelong
-    if any(b in clean_recip for b in ["magicpin", "lifelong"]):
-        print(f"[ColdMailer] 🛑 BLOCKED: Recipient '{recipient_email}' belongs to current/past employer (Magicpin/Lifelong). Outreach rejected.")
-        database.log_event("COLD_EMAIL", "WARNING", f"Blocked send to blacklisted employer: {recipient_email}")
-        return False
+    clean_recip = recipient_email.strip().lower()
+    clean_cc = [c.strip() for c in (cc or []) if c and "@" in c and c.strip().lower() != clean_recip]
+
+    # Hard guardrail against emailing excluded employers on To or Cc
+    all_check_addrs = [clean_recip] + [c.lower() for c in clean_cc]
+    for addr_chk in all_check_addrs:
+        if any(b in addr_chk for b in FORBIDDEN_COMPANIES):
+            print(f"[ColdMailer] 🛑 BLOCKED: Recipient '{addr_chk}' matches excluded company list. Outreach rejected.")
+            database.log_event("COLD_EMAIL", "WARNING", f"Blocked send to excluded employer: {addr_chk}")
+            return False
 
     # 0. Pre-Send DNS & MX Verification (Anti-Bounce Shield)
     is_valid, reason, meta = verify_email(recipient_email)
@@ -172,6 +186,12 @@ def send_cold_email_smtp(recipient_email: str, subject: str, body: str, sender_e
         print(f"[ColdMailer] 🛡️ BLOCKED BOUNCE: Refusing to send to '{recipient_email}'. Reason: {reason}")
         database.log_event("COLD_EMAIL", "WARNING", f"Blocked send to dead email: {recipient_email}", {"reason": reason})
         return False
+
+    verified_cc: List[str] = []
+    for cc_addr in clean_cc:
+        cc_ok, _, _ = verify_email(cc_addr)
+        if cc_ok:
+            verified_cc.append(cc_addr)
 
     sender, app_password = get_sender_credentials(sender_email)
 
@@ -184,7 +204,15 @@ def send_cold_email_smtp(recipient_email: str, subject: str, body: str, sender_e
         msg = MIMEMultipart()
         msg["From"] = f"Vishal Gupta <{sender}>"
         msg["To"] = recipient_email
+        if verified_cc:
+            msg["Cc"] = ", ".join(verified_cc)
         msg["Subject"] = subject
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to.strip()
+        if references:
+            msg["References"] = references.strip()
+        elif in_reply_to:
+            msg["References"] = in_reply_to.strip()
         msg.attach(MIMEText(body, "plain"))
 
         # Attach native ATS resume PDF (works on both Mac and Cloud Linux VM)
@@ -197,6 +225,8 @@ def send_cold_email_smtp(recipient_email: str, subject: str, body: str, sender_e
             part['Content-Disposition'] = 'attachment; filename="Vishal_Gupta_Resume.pdf"'
             msg.attach(part)
 
+        envelope_rcpts = [recipient_email] + verified_cc
+
         # Send via port 587 STARTTLS for maximum reliability
         try:
             with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
@@ -204,29 +234,29 @@ def send_cold_email_smtp(recipient_email: str, subject: str, body: str, sender_e
                 server.starttls()
                 server.ehlo()
                 server.login(sender, app_password)
-                server.sendmail(sender, [recipient_email], msg.as_string())
+                server.sendmail(sender, envelope_rcpts, msg.as_string())
         except Exception:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                 server.login(sender, app_password)
-                server.sendmail(sender, [recipient_email], msg.as_string())
+                server.sendmail(sender, envelope_rcpts, msg.as_string())
 
-        print(f"[ColdMailer] [{sender}] Successfully dispatched cold email to {recipient_email}")
-        database.log_event("COLD_EMAIL", "INFO", f"Cold email sent from {sender} to {recipient_email}", {"subject": subject})
+        print(f"[ColdMailer] [{sender}] Successfully dispatched email to {recipient_email}" + (f" (cc: {verified_cc})" if verified_cc else ""))
+        database.log_event("COLD_EMAIL", "INFO", f"Email sent from {sender} to {recipient_email}", {"subject": subject, "cc": verified_cc})
         return True
     except smtplib.SMTPResponseException as smtp_err:
         if smtp_err.smtp_code == 550 and ("limit exceeded" in str(smtp_err).lower() or "sending limit" in str(smtp_err).lower()):
             college_addr, college_pwd = get_sender_credentials("nsut")
-            if sender != college_addr and college_pwd:
+            if sender != college_addr and college_pwd and not in_reply_to:
                 print(f"[ColdMailer] Gmail daily limit hit. Auto-failing over to NSUT ({college_addr})...")
                 try:
-                    msg["From"] = f"Vishal Gupta <{college_addr}>"
+                    msg.replace_header("From", f"Vishal Gupta <{college_addr}>")
                     with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
                         server.ehlo()
                         server.starttls()
                         server.ehlo()
                         server.login(college_addr, college_pwd)
-                        server.sendmail(college_addr, [recipient_email], msg.as_string())
-                    print(f"[ColdMailer] [{college_addr}] Successfully dispatched cold email (failover) to {recipient_email}")
+                        server.sendmail(college_addr, envelope_rcpts, msg.as_string())
+                    print(f"[ColdMailer] [{college_addr}] Successfully dispatched email (failover) to {recipient_email}")
                     database.log_event("COLD_EMAIL", "INFO", f"Cold email sent from {college_addr} to {recipient_email}", {"subject": subject})
                     return True
                 except Exception as fe:

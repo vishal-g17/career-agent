@@ -292,6 +292,105 @@ def process_and_clean_bounces(mail: imaplib.IMAP4_SSL, user_email: str) -> List[
     return []
 
 
+def _extract_clean_reply_body(raw_bytes: bytes) -> str:
+    try:
+        msg = email.message_from_bytes(raw_bytes)
+        plain_parts: List[str] = []
+        html_parts: List[str] = []
+        for part in (msg.walk() if msg.is_multipart() else [msg]):
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition") or "")
+            if "attachment" in disp.lower():
+                continue
+            payload = part.get_payload(decode=True)
+            if isinstance(payload, bytes):
+                txt = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+                if ctype == "text/plain":
+                    plain_parts.append(txt)
+                elif ctype == "text/html":
+                    html_parts.append(re.sub(r"<[^>]+>", " ", txt))
+        body = "\n".join(plain_parts).strip() or "\n".join(html_parts).strip()
+        return re.sub(r"\s+", " ", body).strip()
+    except Exception:
+        return raw_bytes.decode("utf-8", errors="ignore")[:500].strip()
+
+
+def classify_inbound_reply(subject: str, body: str, auto_submitted_hdr: str = "") -> str:
+    """
+    Classifies an inbound recruiter email into one of:
+      - 'exited_redirected': Exited employee / deactivated / unmonitored mailbox
+      - 'ooo_auto_reply': Out-of-office / holiday / Diwali / travel auto-responder (keep lead eligible for follow-ups!)
+      - 'closed_no_opening': Explicit rejection / not hiring / no openings matching profile
+      - 'replied': Genuine human reply
+    """
+    s_low = (subject or "").lower()
+    # Strip quoted original message so we classify ONLY the sender's reply text
+    top_body = re.split(r"\bon\s+(?:mon|tue|wed|thu|fri|sat|sun|\d{1,2}\s+[a-z]{3})|-----original message-----", body or "", maxsplit=1, flags=re.IGNORECASE)[0]
+    b_low = top_body.lower()
+    auto_low = (auto_submitted_hdr or "").lower()
+
+    exited_phrases = (
+        "no longer employed",
+        "no longer with the company",
+        "no longer with ",
+        "no longer works at",
+        "no longer associated with",
+        "no longer active",
+        "no longer in use",
+        "not being monitored",
+        "moved on from my role",
+        "moved out of ",
+        "moved on to a new opportunity",
+        "last working day with the organization",
+        "accounts will be deactivated",
+        "going forward, please use my ",
+    )
+    if any(p in b_low for p in exited_phrases):
+        return "exited_redirected"
+
+    no_opening_phrases = (
+        "unfortunately, we are not currently hiring",
+        "we are not currently hiring",
+        "not hiring at the moment",
+        "don't have openings",
+        "don\u2019t have openings",
+        "do not have any openings",
+        "do not have openings",
+        "do not have any vacancies",
+        "not able to take your candidature forward",
+        "will not be moving forward with your application",
+        "there is no opening",
+        "no current openings",
+    )
+    if any(p in b_low for p in no_opening_phrases):
+        return "closed_no_opening"
+
+    ooo_subject_prefixes = ("automatic reply:", "out of office", "auto response", "auto-reply", "ooo ", "ooo:")
+    ooo_body_phrases = (
+        "out of office",
+        "out of the office",
+        "currently on leave",
+        "am on leave",
+        "will be on leave",
+        "on planned leave",
+        "annual leave",
+        "am ooo",
+        "i will be ooo",
+        "i am ooo",
+        "limited access to email",
+        "limited access to my email",
+        "limited access to mails",
+        "no access to mails",
+        "away from the office",
+        "out of the country on business travel",
+        "i am on travel",
+    )
+    if s_low.startswith(ooo_subject_prefixes) or any(p in b_low for p in ooo_body_phrases) or ("auto-replied" in auto_low):
+        return "ooo_auto_reply"
+
+    return "replied"
+
+
 def check_account_replies(user_email: str, app_password: str, account_label: str) -> List[Dict[str, Any]]:
     detected = []
     clean_pwd = (app_password or "").replace(" ", "").strip()
@@ -312,7 +411,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
 
         conn = database.get_connection()
         active_leads = conn.execute(
-            "SELECT id, name, email, company, status, sender_email FROM outreach_leads WHERE status IN ('sent', 'pending')"
+            "SELECT id, name, email, company, status, sender_email, COALESCE(reply_snippet, '') AS reply_snippet FROM outreach_leads WHERE status IN ('sent', 'pending')"
         ).fetchall()
         conn.close()
         lead_map = {row["email"].lower(): row for row in active_leads if row["email"]}
@@ -328,7 +427,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
             mail.logout()
             return []
 
-        res, batch_data = mail.fetch(b",".join(target_ids), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+        res, batch_data = mail.fetch(b",".join(target_ids), "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT AUTO-SUBMITTED)])")
         if res != "OK" or not batch_data:
             mail.logout()
             return []
@@ -346,6 +445,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
 
             from_header = _decode_str(msg.get("From", ""))
             subject = _decode_str(msg.get("Subject", ""))
+            auto_sub = _decode_str(msg.get("Auto-Submitted", ""))
 
             sender_match = EMAIL_TOKEN_RE.search(from_header)
             if not sender_match:
@@ -354,7 +454,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
             sender_email = sender_match.group(0).lower()
             if sender_email in lead_map:
                 lead = lead_map[sender_email]
-                if lead["status"] == "replied":
+                if lead["status"] in ("replied", "closed_no_opening", "exited_redirected"):
                     continue
                 lead_id = lead["id"]
                 name = lead["name"] or from_header
@@ -362,13 +462,39 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
 
                 snippet = ""
                 try:
-                    b_res, b_data = mail.fetch(m_id, "(BODY.PEEK[TEXT])")
+                    b_res, b_data = mail.fetch(m_id, "(BODY.PEEK[])")
                     if b_res == "OK" and b_data and len(b_data) > 0:
-                        raw_body = b_data[0][1] if isinstance(b_data[0], tuple) else b_data[0]
-                        if isinstance(raw_body, bytes):
-                            snippet = raw_body.decode("utf-8", errors="ignore")[:350].strip()
+                        raw_full = b_data[0][1] if isinstance(b_data[0], tuple) else b_data[0]
+                        if isinstance(raw_full, bytes):
+                            snippet = _extract_clean_reply_body(raw_full)
                 except Exception:
                     snippet = f"New reply received in your {account_label} inbox."
+
+                reply_kind = classify_inbound_reply(subject, snippet, auto_sub)
+
+                if reply_kind == "ooo_auto_reply":
+                    # Keep status='sent' so post-holiday follow-ups still fire!
+                    if not (lead["reply_snippet"] or "").startswith("[OOO]"):
+                        with database.get_connection() as c:
+                            c.execute(
+                                "UPDATE outreach_leads SET reply_snippet = ? WHERE id = ? AND status = 'sent'",
+                                (f"[OOO] {snippet[:380]}", lead_id),
+                            )
+                    del lead_map[sender_email]
+                    continue
+
+                if reply_kind in ("exited_redirected", "closed_no_opening"):
+                    with database.get_connection() as c:
+                        c.execute(
+                            """
+                            UPDATE outreach_leads
+                            SET status = ?, reply_received_at = CURRENT_TIMESTAMP, reply_snippet = ?
+                            WHERE id = ?
+                            """,
+                            (reply_kind, snippet[:400], lead_id),
+                        )
+                    del lead_map[sender_email]
+                    continue
 
                 with database.get_connection() as c:
                     c.execute(

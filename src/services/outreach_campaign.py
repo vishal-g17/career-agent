@@ -71,12 +71,21 @@ def get_today_sender_counts(conn) -> Dict[str, int]:
         """
         SELECT sender_email, COUNT(*) as cnt
         FROM outreach_leads
-        WHERE status = 'sent'
-          AND date(COALESCE(last_sent_at, first_sent_at), '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
+        WHERE status IN ('sent', 'unresponsive', 'replied')
+          AND (
+              date(first_sent_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
+              OR date(followup_1_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
+              OR date(followup_2_at, '+5 hours', '30 minutes') = date('now', '+5 hours', '30 minutes')
+          )
         GROUP BY sender_email
         """
     ).fetchall()
-    return {(r["sender_email"] or "").strip().lower(): int(r["cnt"]) for r in rows}
+    out: Dict[str, int] = {}
+    for r in rows:
+        raw_s = (r["sender_email"] or "").split(",")[0].strip().lower()
+        if raw_s:
+            out[raw_s] = out.get(raw_s, 0) + int(r["cnt"])
+    return out
 
 
 def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 30, sender_mode: str = "rotate") -> Dict[str, Any]:
@@ -265,14 +274,50 @@ def send_outreach_batch(company_filter: Optional[str] = None, batch_size: int = 
         "results": results,
     }
 
-def process_pending_followups(max_followups: int = 20) -> Dict[str, Any]:
+def _format_followup_greeting_and_org(raw_name: str, raw_company: str) -> tuple:
+    import re
+    clean_n = (raw_name or "").strip()
+    generic_names = {
+        "", "hiring team", "hr", "hr team", "careers", "talent", "talent acquisition",
+        "recruiter", "recruitment", "people team", "team", "admin", "info", "jobs",
+    }
+    first_tok = clean_n.split()[0].strip(",.") if clean_n else ""
+    if (
+        clean_n.lower() in generic_names
+        or first_tok.lower() in generic_names
+        or any(ch in first_tok for ch in ("@", "-", "_", "/"))
+        or any(ch.isdigit() for ch in first_tok)
+        or len(first_tok) < 2
+    ):
+        salutation = "Hi,"
+    else:
+        salutation = f"Hi {first_tok},"
+
+    clean_c = (raw_company or "").strip()
+    generic_orgs = {
+        "", "your team", "tech company", "hiring lead via linkedin post",
+        "linkedin post", "stealth", "unknown", "company", "hiring team",
+    }
+    if clean_c.lower() in generic_orgs or "linkedin post" in clean_c.lower():
+        at_org = "on your team"
+        wish_org = "your team"
+    else:
+        at_org = f"at {clean_c}"
+        wish_org = f"the {clean_c} team"
+    return salutation, at_org, wish_org
+
+
+def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
     """
-    Scans for leads that have received outreach, haven't replied, and are due for follow-ups:
-      - Follow-up #1: 3 days (72h) after initial send (`first_sent_at <= datetime('now', '-3 days')`)
-      - Follow-up #2: 4 days (96h) after Follow-up #1 (`followup_1_at <= datetime('now', '-4 days')`)
-    Strictly uses the exact same sender email address that initiated the original thread,
-    respects daily caps (1,500 NSUT / 500 Gmail), and skips any bounced/excluded/replied leads.
+    Scans for leads that have received outreach, haven't replied/rejected/exited, and are due for follow-ups:
+      - Follow-up #1: >= 2 days (48h) after initial send (`first_sent_at <= datetime('now', '-2 days')`)
+      - Follow-up #2: >= 4 days (96h) after Follow-up #1 (`followup_1_at <= datetime('now', '-4 days')`)
+    Dispatches NSUT and Gmail follow-ups in parallel sender lanes, strictly using the exact same
+    sender email address that initiated the original thread and respecting daily caps (1,500 NSUT / 500 Gmail).
     """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     conn = database.get_connection()
     today_counts = get_today_sender_counts(conn)
 
@@ -281,11 +326,11 @@ def process_pending_followups(max_followups: int = 20) -> Dict[str, Any]:
         SELECT * FROM outreach_leads 
         WHERE status = 'sent' AND COALESCE(followup_count, 0) = 0 
           AND first_sent_at IS NOT NULL
-          AND first_sent_at <= datetime('now', '-3 days')
+          AND first_sent_at <= datetime('now', '-2 days')
         ORDER BY first_sent_at ASC
         LIMIT ?
         """,
-        (max_followups,),
+        (max_followups * 2,),
     ).fetchall()
 
     fu2_rows = conn.execute(
@@ -305,100 +350,124 @@ def process_pending_followups(max_followups: int = 20) -> Dict[str, Any]:
     if not tasks:
         return {"followup_1_sent": 0, "followup_2_sent": 0, "due_remaining": 0}
 
-    fu1_sent = 0
-    fu2_sent = 0
     default_sender = getattr(config, "COLLEGE_EMAIL_ADDRESS", "vishal.gupta.ug22@nsut.ac.in")
-
+    lanes: Dict[str, List[tuple]] = {}
     for stage, lead in tasks:
-        lead_id = lead["id"]
-        name = (lead.get("name") or "Hiring Team").strip()
-        email_addr = (lead.get("email") or "").strip()
-        company = (lead.get("company") or "Your Team").strip()
         raw_sender = (lead.get("sender_email") or default_sender).split(",")[0].strip()
         sender_email = raw_sender if "@" in raw_sender else default_sender
-
-        if is_bounced_or_discarded(email_addr):
-            record_bounced_email(email_addr, "Pre-followup bounce blocklist")
-            continue
-        excl = is_excluded(name=name, headline=f"{company} {email_addr}")
-        if excl:
-            record_bounced_email(email_addr, f"Excluded: {excl}")
-            continue
-
-        # Enforce daily sender cap (shared with fresh sends)
+        s_key = sender_email.lower()
         cap = get_sender_daily_cap(sender_email)
-        if today_counts.get(sender_email.lower(), 0) >= cap:
+        already = today_counts.get(s_key, 0) + len(lanes.get(sender_email, []))
+        if already >= cap:
             continue
+        if len(lanes.get(sender_email, [])) >= max_followups:
+            continue
+        lanes.setdefault(sender_email, []).append((stage, lead))
 
-        # Double-check live status right before SMTP send in case a reply or bounce arrived moments ago
-        with database.get_connection() as chk_c:
-            cur_row = chk_c.execute("SELECT status FROM outreach_leads WHERE id = ?", (lead_id,)).fetchone()
-            if not cur_row or cur_row["status"] != "sent":
+    if not lanes:
+        return {"followup_1_sent": 0, "followup_2_sent": 0, "due_remaining": 0}
+
+    db_lock = threading.Lock()
+    counters = {"fu1": 0, "fu2": 0}
+
+    def _run_followup_lane(sender_email: str, lane_items: List[tuple]) -> None:
+        s_key = sender_email.lower()
+        cap = get_sender_daily_cap(sender_email)
+        for idx, (stage, lead) in enumerate(lane_items):
+            lead_id = lead["id"]
+            name = (lead.get("name") or "Hiring Team").strip()
+            email_addr = (lead.get("email") or "").strip()
+            company = (lead.get("company") or "Your Team").strip()
+
+            if is_bounced_or_discarded(email_addr):
+                record_bounced_email(email_addr, "Pre-followup bounce blocklist")
+                continue
+            excl = is_excluded(name=name, headline=f"{company} {email_addr}")
+            if excl:
+                record_bounced_email(email_addr, f"Excluded: {excl}")
                 continue
 
-        last_subj = (lead.get("last_subject") or "").strip() or (
-            "Application: Business / Product Analyst / Management — Vishal Gupta (1 yr exp | NSUT Delhi | Immediate Joiner)"
-        )
-        subject = last_subj if last_subj.lower().startswith("re:") else f"Re: {last_subj}"
+            with db_lock:
+                if today_counts.get(s_key, 0) >= cap:
+                    break
+                with database.get_connection() as chk_c:
+                    cur_row = chk_c.execute("SELECT status FROM outreach_leads WHERE id = ?", (lead_id,)).fetchone()
+                    if not cur_row or cur_row["status"] != "sent":
+                        continue
 
-        if stage == 1:
-            body = (
-                f"Hi {name},\n\n"
-                "Following up briefly on my previous note in case it got buried. I’m an immediate joiner (15 days) from NSUT Delhi "
-                "with 1 year of hands-on experience across product analytics, conversion optimization, merchant growth, and Python/SQL automation.\n\n"
-                f"If there are any openings across Product Analyst, Business Analyst, APM, or Founder's Office roles at {company}, "
-                "I’d be grateful for a quick chat or pointer to the right hiring manager.\n\n"
-                "Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n"
-                "Portfolio: https://vishalgupta.vercel.app/\n\n"
-                "Best regards,\n"
-                "Vishal Gupta\n"
-                "📞 +91 8368387245\n"
-                f"✉️ {sender_email}\n"
-                "🔗 https://www.linkedin.com/in/vshal-g007"
+            last_subj = (lead.get("last_subject") or "").strip() or (
+                "Application: Business / Product Analyst / Management — Vishal Gupta (1 yr exp | NSUT Delhi | Immediate Joiner)"
             )
-        else:
-            body = (
-                f"Hi {name},\n\n"
-                "Sending one final quick follow-up so I don't crowd your inbox. If your team is hiring or planning to hire for "
-                "Product / Business / Data Analyst or APM roles in the coming weeks, I’d love to be considered.\n\n"
-                f"Wishing you and the {company} team continued growth!\n\n"
-                "Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n\n"
-                "Best regards,\n"
-                "Vishal Gupta\n"
-                "📞 +91 8368387245\n"
-                f"✉️ {sender_email}\n"
-                "🔗 https://www.linkedin.com/in/vshal-g007"
-            )
+            subject = last_subj if last_subj.lower().startswith("re:") else f"Re: {last_subj}"
+            salutation, at_org, wish_org = _format_followup_greeting_and_org(name, company)
 
-        ok = send_cold_email_smtp(email_addr, subject, body, sender_email=sender_email)
-        if ok:
-            today_counts[sender_email.lower()] = today_counts.get(sender_email.lower(), 0) + 1
-            with database.get_connection() as c:
-                if stage == 1:
-                    c.execute(
-                        """
-                        UPDATE outreach_leads 
-                        SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, last_subject = ?
-                        WHERE id = ? AND status = 'sent'
-                        """,
-                        (subject, lead_id),
-                    )
-                    fu1_sent += 1
-                    print(f"[FollowUp #1] ✅ Sent on thread via {sender_email} -> {name} ({company}, {email_addr})")
+            if stage == 1:
+                body = (
+                    f"{salutation}\n\n"
+                    "Hope you had a great Diwali break! Following up briefly on my previous note in case it got buried.\n\n"
+                    "I’m a B.Tech Mathematics & Computing graduate from NSUT Delhi and an immediate joiner (15 days) "
+                    "with 1 year of full-time experience across product analytics, conversion optimization, merchant growth, and Python/SQL automation.\n\n"
+                    f"If there are any openings across Product Analyst, Business Analyst, APM, or Founder's Office roles {at_org}, "
+                    "I’d be grateful for a quick chat or a pointer to the right hiring manager.\n\n"
+                    "Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n"
+                    "Portfolio: https://vishalgupta.vercel.app/\n\n"
+                    "Best regards,\n"
+                    "Vishal Gupta\n"
+                    "📞 +91 8368387245\n"
+                    f"✉️ {sender_email}\n"
+                    "🔗 https://www.linkedin.com/in/vshal-g007"
+                )
+            else:
+                body = (
+                    f"{salutation}\n\n"
+                    "Sending one final quick follow-up so I don't crowd your inbox. If your team is hiring or planning to hire for "
+                    "Product / Business / Data Analyst or APM roles in the coming weeks, I’d love to be considered.\n\n"
+                    f"Wishing you and {wish_org} continued growth!\n\n"
+                    "Resume: https://drive.google.com/file/d/1i-4MK7lm3FOOD_6e6gKFuYx9l_ikHK4q/view?usp=sharing\n\n"
+                    "Best regards,\n"
+                    "Vishal Gupta\n"
+                    "📞 +91 8368387245\n"
+                    f"✉️ {sender_email}\n"
+                    "🔗 https://www.linkedin.com/in/vshal-g007"
+                )
+
+            ok = send_cold_email_smtp(email_addr, subject, body, sender_email=sender_email)
+            with db_lock:
+                if ok:
+                    today_counts[s_key] = today_counts.get(s_key, 0) + 1
+                    with database.get_connection() as c:
+                        if stage == 1:
+                            c.execute(
+                                """
+                                UPDATE outreach_leads 
+                                SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, last_subject = ?
+                                WHERE id = ? AND status = 'sent'
+                                """,
+                                (subject, lead_id),
+                            )
+                            counters["fu1"] += 1
+                            print(f"[FollowUp #1] ✅ Sent via {sender_email} ({today_counts[s_key]}/{cap}) -> {name} ({company}, {email_addr})")
+                        else:
+                            c.execute(
+                                """
+                                UPDATE outreach_leads 
+                                SET followup_count = 2, followup_2_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, status = 'unresponsive'
+                                WHERE id = ? AND status = 'sent'
+                                """,
+                                (lead_id,),
+                            )
+                            counters["fu2"] += 1
+                            print(f"[FollowUp #2] ✅ Final follow-up sent via {sender_email} -> {name} ({company}, {email_addr})")
                 else:
-                    c.execute(
-                        """
-                        UPDATE outreach_leads 
-                        SET followup_count = 2, followup_2_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, status = 'unresponsive'
-                        WHERE id = ? AND status = 'sent'
-                        """,
-                        (lead_id,),
-                    )
-                    fu2_sent += 1
-                    print(f"[FollowUp #2] ✅ Final follow-up sent via {sender_email} -> {name} ({company}, {email_addr})")
-            time.sleep(round(random.uniform(5.5, 18.5), 1))
-        else:
-            record_bounced_email(email_addr, "Follow-up SMTP failure / bounce")
+                    record_bounced_email(email_addr, "Follow-up SMTP failure / bounce")
+
+            if idx < len(lane_items) - 1:
+                time.sleep(round(random.uniform(5.0, 14.5), 1))
+
+    with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
+        futs = [pool.submit(_run_followup_lane, s, items) for s, items in lanes.items()]
+        for f in futs:
+            f.result()
 
     with database.get_connection() as rem_c:
         due_rem = rem_c.execute(
@@ -406,13 +475,13 @@ def process_pending_followups(max_followups: int = 20) -> Dict[str, Any]:
             SELECT COUNT(*) FROM outreach_leads
             WHERE status = 'sent'
               AND (
-                  (COALESCE(followup_count, 0) = 0 AND first_sent_at <= datetime('now', '-3 days'))
+                  (COALESCE(followup_count, 0) = 0 AND first_sent_at <= datetime('now', '-2 days'))
                   OR (followup_count = 1 AND followup_1_at <= datetime('now', '-4 days'))
               )
             """
         ).fetchone()[0]
 
-    return {"followup_1_sent": fu1_sent, "followup_2_sent": fu2_sent, "due_remaining": due_rem}
+    return {"followup_1_sent": counters["fu1"], "followup_2_sent": counters["fu2"], "due_remaining": due_rem}
 
 def get_campaign_stats() -> Dict[str, Any]:
     """
