@@ -118,7 +118,7 @@ def run_indeed_batch(limit: int = 12) -> int:
     pending_fresh = cur.execute(
         "SELECT count(*) FROM jobs WHERE job_id LIKE 'indeed_%' AND status = 'new'"
     ).fetchone()[0]
-    if sys.platform == "darwin" and pending_fresh < 8:
+    if sys.platform == "darwin" and pending_fresh < 15:
         try:
             _discover_fresh_indeed_into_db(conn)
         except Exception as de:

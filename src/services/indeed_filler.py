@@ -189,7 +189,8 @@ def scrape_fresh_indeed_jobs(keywords: Optional[List[str]] = None) -> List[Dict[
                 time.sleep(1.2)
         finally:
             try:
-                page.close()
+                if len(ctx.pages) > 1:
+                    page.close()
             except Exception:
                 pass
 
@@ -584,7 +585,8 @@ def apply_to_indeed_job(job_url: str, role_title: str = "Product Analyst") -> Di
                 except Exception:
                     pass
             try:
-                page.close()
+                if len(ctx.pages) > 1:
+                    page.close()
             except Exception:
                 pass
 

@@ -415,6 +415,8 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
                     break
                 if not sync_control_with_cloud().get("linkedin_enabled", True):
                     break
+                if page.is_closed():
+                    page = context.new_page()
                 try:
                     ok = _try_apply_on_loaded_linkedin_job(page, context, port, jid, title, comp, jurl, conn)
                     if ok:
@@ -431,6 +433,8 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
             while time.time() < end_time and applied_count < max_apps:
                 if not sync_control_with_cloud().get("linkedin_enabled", True):
                     break
+                if page.is_closed():
+                    page = context.new_page()
                 kw = TARGET_KEYWORDS[kw_idx % len(TARGET_KEYWORDS)]
                 kw_idx += 1
                 s_url = f"https://www.linkedin.com/jobs/search/?keywords={urllib.parse.quote(kw)}&f_AL=true&f_TPR=r86400&location=India"
@@ -448,6 +452,8 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
                 for item in links:
                     if time.time() >= end_time or applied_count >= max_apps:
                         break
+                    if page.is_closed():
+                        page = context.new_page()
                     lu = item["url"]
                     if cur.execute("SELECT 1 FROM jobs WHERE url LIKE ? AND status='applied'", (f"%{lu[-12:]}%",)).fetchone():
                         continue
@@ -457,7 +463,8 @@ def apply_linkedin_jobs_stage(duration_minutes: int = 10, max_apps: int = 8) -> 
                         time.sleep(random.uniform(18, 32))
         finally:
             try:
-                page.close()
+                if len(context.pages) > 1 and not page.is_closed():
+                    page.close()
             except Exception:
                 pass
 

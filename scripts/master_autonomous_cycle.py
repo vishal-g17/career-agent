@@ -82,68 +82,57 @@ def refill_connections_queue(page, conn, min_needed: int = 50, max_scrolls: int 
     needed_to_add = min_needed - pending_count
     print(f"[Queue:Refill] Queue low ({pending_count} pending). Dynamically replenishing at least {needed_to_add} fresh connections...")
     try:
-        loaded = False
-        for url in ["https://www.linkedin.com/mynetwork/invite-connect/connections/", "https://www.linkedin.com/mynetwork/network-manager/people-connection/"]:
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                loaded = True
-                break
-            except Exception as e:
-                if "429" in str(e) or "ERR_HTTP_RESPONSE_CODE_FAILURE" in str(e):
-                    print(f"[Queue:Refill] 429 throttle detected on {url}. Cooling down for 120s...")
-                    time.sleep(120)
-                else:
-                    time.sleep(2)
-        if not loaded:
-            return 0
-        page.wait_for_timeout(3000)
+        js_extract = """
+        () => {
+            const results = [];
+            const seen = new Set();
+            const links = Array.from(document.querySelectorAll("main a[href*='/in/']"));
+            for (const a of links) {
+                const href = a.href || "";
+                const parts = href.split("/in/");
+                if (parts.length < 2) continue;
+                const uname = parts[1].split("/")[0].split("?")[0].trim();
+                if (!uname || uname === "vshal-g007" || seen.has(uname)) continue;
 
-        added = 0
-        scroll_passes = 0
-        while scroll_passes < max_scrolls and added < needed_to_add:
-            for _ in range(5):
-                page.evaluate('''() => {
-                    const m = document.querySelector('main');
-                    if (m) m.scrollTop = m.scrollHeight;
-                    window.scrollTo(0, document.body.scrollHeight);
-                }''')
-                page.mouse.wheel(0, 4000)
-                page.wait_for_timeout(600)
-            scroll_passes += 5
+                const linkTxt = (a.innerText || "").trim();
+                if (!linkTxt || linkTxt.length < 3) continue;
 
-            js_extract = """
-            () => {
-                const results = [];
-                const seen = new Set();
-                const connectionCards = document.querySelectorAll("[componentkey^='ConnectionCard_']");
-                for (const card of connectionCards) {
-                    const a = card.querySelector("a[href*='/in/']");
-                    if (!a) continue;
-                    const parts = a.href.split("/in/");
-                    if (parts.length < 2) continue;
-                    const uname = parts[1].split("/")[0].split("?")[0];
-                    if (!uname || seen.has(uname)) continue;
-
-                    const lines = (card.innerText || "").split("\\n").map(l => l.trim()).filter(Boolean);
-                    const name = lines[0] || uname;
-                    const headline = lines[1] || "";
-                    const isConnected = lines.some(l => l.includes("Connected on") || l.includes("Connected "));
-
-                    if (isConnected) {
-                        seen.add(uname);
-                        results.push({ username: uname, name: name, headline: headline });
+                let row = a;
+                let rowTxt = "";
+                for (let d = 0; d < 5 && row; d++) {
+                    const t = (row.innerText || "").trim();
+                    if ((t.includes("Connected on") || t.includes("Message") || t.includes("• 1st")) && t.length < 650) {
+                        rowTxt = t;
+                        break;
                     }
+                    row = row.parentElement;
                 }
-                return results;
+                if (!rowTxt) continue;
+
+                const lines = rowTxt.split("\\n").map(l => l.trim()).filter(Boolean);
+                const name = (lines[0] || linkTxt.split("\\n")[0].trim() || uname).replace("• 1st", "").trim();
+                let headline = "";
+                for (let i = 1; i < lines.length; i++) {
+                    const ln = lines[i];
+                    if (ln.startsWith("•") || ln.startsWith("Connected on") || ln === "Message" || ln.includes("mutual connection")) continue;
+                    headline = ln;
+                    break;
+                }
+
+                seen.add(uname);
+                results.push({ username: uname, name: name, headline: headline });
             }
-            """
-            extracted = page.evaluate(js_extract)
-            for item in extracted:
+            return results;
+        }
+        """
+
+        def _ingest_extracted(extracted_list) -> int:
+            newly_added = 0
+            for item in extracted_list:
                 uname = item["username"]
                 name = item["name"]
                 headline = item["headline"]
 
-                exclusion = is_excluded(name=name, headline=headline)
                 cur.execute("SELECT id FROM linkedin_connections_outreach WHERE id=?", (uname,))
                 if cur.fetchone():
                     continue
@@ -151,16 +140,49 @@ def refill_connections_queue(page, conn, min_needed: int = 50, max_scrolls: int 
                 if cur.fetchone():
                     continue
 
+                exclusion = is_excluded(name=name, headline=headline)
                 status = 'excluded' if exclusion else 'pending'
+                excl_val = exclusion if exclusion else None
                 cur.execute('''
                     INSERT OR REPLACE INTO linkedin_connections_queue (id, name, headline, exclusion_reason, status)
                     VALUES (?, ?, ?, ?, ?)
-                ''', (uname, name, headline, exclusion, status))
+                ''', (uname, name, headline, excl_val, status))
                 if not exclusion:
-                    added += 1
-
+                    newly_added += 1
             conn.commit()
-            print(f"[Queue:Refill] Scroll pass {scroll_passes}/{max_scrolls}: {added}/{needed_to_add} eligible connections found so far.")
+            return newly_added
+
+        added = 0
+
+        # Step 1: Check top of "Recently added" connections first so newly accepted 1st-degree connections are queued immediately
+        try:
+            page.goto("https://www.linkedin.com/mynetwork/invite-connect/connections/", wait_until="domcontentloaded", timeout=20000)
+            page.wait_for_timeout(2600)
+            added += _ingest_extracted(page.evaluate(js_extract))
+        except Exception:
+            pass
+
+        # Step 2: Direct pagination into 1st-degree people search (`network=["F"]`) to reach unmessaged connections across all 4,250+ connections in seconds!
+        if added < needed_to_add:
+            cur.execute("SELECT (SELECT COUNT(*) FROM linkedin_connections_outreach) + (SELECT COUNT(*) FROM linkedin_connections_queue)")
+            total_processed = cur.fetchone()[0] or 0
+            base_page = max(1, min(90, (total_processed // 15) + 1))
+            candidate_pages = list(range(base_page, min(100, base_page + 12))) + random.sample(range(15, 98), k=6)
+
+            for pg_num in candidate_pages:
+                if added >= needed_to_add:
+                    break
+                p_url = f"https://www.linkedin.com/search/results/people/?network=%5B%22F%22%5D&page={pg_num}"
+                try:
+                    page.goto(p_url, wait_until="domcontentloaded", timeout=20000)
+                    page.wait_for_timeout(2400)
+                    batch_new = _ingest_extracted(page.evaluate(js_extract))
+                    added += batch_new
+                    print(f"[Queue:Refill] 1st-degree page {pg_num}: +{batch_new} ({added}/{needed_to_add} queued).")
+                except Exception as pe:
+                    if "429" in str(pe):
+                        time.sleep(60)
+                        break
 
         print(f"[Queue:Refill] Replenished queue with {added} fresh eligible connections.")
         return added
@@ -413,147 +435,186 @@ def send_poc_request(page, username: str, full_name: str, custom_note: str = "")
         # Remove chat bubbles
         page.evaluate('() => document.querySelectorAll(".msg-overlay-container, .msg-overlay-list-bubble").forEach(el => el.remove())')
 
-        # Full-profile Experience & employer badge exclusion check before clicking Connect!
+        # Full-profile Experience & employer badge exclusion check before sending Connect!
         page.mouse.wheel(0, 1200)
         page.wait_for_timeout(1000)
         prof_txt = page.evaluate(JS_EXTRACT_PROFILE_BODY_ONLY) or ""
+        if len(prof_txt.strip()) < 60:
+            return False
         if has_forbidden_company(prof_txt):
             print(f"[ExclusionGuard] 🛑 BLOCKED 2nd-degree Connect for {username}: matched restricted employer on profile!")
             _mark_linkedin_user_excluded(username, "E1_CONFIDENTIAL_COMPANY")
             return False
-        page.evaluate("() => window.scrollTo(0, 0)")
-        page.wait_for_timeout(400)
 
-        # 1. Look for top-card Connect button
-        connect_btn = page.locator('main section:first-of-type button:has-text("Connect")').first
-        if not connect_btn.is_visible():
-            connect_btn = page.locator('div[class*="pv-top-card"] button:has-text("Connect"), .ph5 button:has-text("Connect")').first
-
-        # 2. Fallback to More menu if Connect is nested
-        if not connect_btn.is_visible():
-            more_btn = page.locator('main section:first-of-type button[aria-label*="More actions"], main section:first-of-type button:has-text("More")').first
-            if more_btn.is_visible():
-                more_btn.click(no_wait_after=True)
-                page.wait_for_timeout(1000)
-                connect_btn = page.locator('div[role="menuitem"]:has-text("Connect"), span:text-is("Connect")').first
-
-        if not connect_btn.is_visible():
-            print(f"[Cycle:2ndDegree] No Connect button found on profile for {full_name}")
+        # Check if already Pending on profile
+        pending_el = page.locator('main a:has-text("Pending"), main button:has-text("Pending"), main [aria-label*="Pending"]').first
+        if pending_el.count() > 0 and pending_el.is_visible():
             return False
 
-        connect_btn.click(no_wait_after=True)
-        page.wait_for_timeout(2000)
+        # LinkedIn 2026 UI uses `/preload/custom-invite/?vanityName={username}` (anchor link on profile/search)!
+        invite_url = f"https://www.linkedin.com/preload/custom-invite/?vanityName={username}"
+        page.goto(invite_url, wait_until="domcontentloaded", timeout=22000)
+        page.wait_for_timeout(2400)
 
-        # Check if button changed to Pending directly without modal
-        pending_btn = page.locator('main section:first-of-type button:has-text("Pending"), .ph5 button:has-text("Pending")').first
-        if pending_btn.is_visible():
-            print(f"[Cycle:2ndDegree] -> Connected instantly (button is Pending) for {full_name}!")
-            return True
-
-        dialog = page.locator('.artdeco-modal[role="dialog"], #artdeco-modal-outlet .artdeco-modal, .artdeco-modal, [data-test-modal]').first
-        if not dialog.is_visible(timeout=3000):
-            if pending_btn.is_visible():
-                print(f"[Cycle:2ndDegree] -> Connected instantly for {full_name}!")
-                return True
-            print(f"[Cycle:2ndDegree] Connect modal did not appear for {full_name}")
-            return False
-
-        # Check if weekly limit reached modal popped up
-        modal_text = dialog.inner_text().lower()
-        if "weekly invitation limit" in modal_text or "reached the limit" in modal_text or "out of invitations" in modal_text:
-            print(f"[Cycle:2ndDegree] LinkedIn weekly invitation limit reached. Handled gracefully.")
-            dismiss_btn = dialog.locator('button:has-text("Got it"), button:has-text("Dismiss"), button[aria-label="Dismiss"]').first
-            if dismiss_btn.is_visible():
+        body_lower = (page.locator("body").inner_text() or "").lower()
+        if (
+            "weekly invitation limit" in body_lower
+            or "reached the weekly" in body_lower
+            or "reached the limit" in body_lower
+            or "out of invitations" in body_lower
+        ):
+            print("[Cycle:2ndDegree] LinkedIn weekly invitation limit reached. Handled gracefully.")
+            dismiss_btn = page.locator('button:has-text("Got it"), button[aria-label="Dismiss"]').first
+            if dismiss_btn.count() > 0 and dismiss_btn.is_visible():
                 dismiss_btn.click(no_wait_after=True)
             return "LIMIT_REACHED"
 
-        add_note_btn = dialog.locator('button:has-text("Add a note")').first
-        if add_note_btn.is_visible() and add_note_btn.is_enabled():
+        # Prefer Send without a note if custom note modal is upselling Premium, else try Add a note first
+        send_without_note = page.locator('button:has-text("Send without a note"), button[aria-label*="Send without a note"]').first
+        add_note_btn = page.locator('button:has-text("Add a note"), button[aria-label="Add a note"]').first
+
+        if add_note_btn.count() > 0 and add_note_btn.is_visible() and add_note_btn.is_enabled():
             try:
-                add_note_btn.click(no_wait_after=True)
-                page.wait_for_timeout(800)
-                note_box = dialog.locator('textarea').first
-                if note_box.is_visible():
-                    # Must be <= 200 chars for free LinkedIn limit
-                    if custom_note:
-                        note_text = custom_note[:180]
-                    else:
-                        note_text = (
-                            f"Hi {first_name}, really admire your team's product growth. 1 yr exp in product & analytics (immediate 15-day joiner) & would love to connect!"
-                        )[:180]
-                    note_box.click()
+                add_note_btn.click(no_wait_after=True, timeout=3000)
+                page.wait_for_timeout(900)
+                note_box = page.locator('textarea#custom-message, textarea[name="message"], div[role="dialog"] textarea').first
+                if note_box.count() > 0 and note_box.is_visible():
+                    note_text = (
+                        custom_note[:180]
+                        if custom_note
+                        else f"Hi {first_name}, admire your work in product/talent! NSUT '26 B.Tech with 1 yr product & analytics exp (immediate 15-day joiner) - would love to connect!"[:180]
+                    )
+                    note_box.click(timeout=2500)
                     page.keyboard.insert_text(note_text)
                     page.wait_for_timeout(600)
-            except Exception as e:
-                print(f"[Cycle:2ndDegree] Note error on {username}: {e}")
+                    send_btn = page.locator('div[role="dialog"] button[aria-label="Send invitation"], div[role="dialog"] button:has-text("Send")').last
+                    if send_btn.count() > 0 and send_btn.is_visible() and send_btn.is_enabled():
+                        send_btn.click(no_wait_after=True, timeout=3000)
+                        page.wait_for_timeout(2200)
+                        post_txt = (page.locator("body").inner_text() or "").lower()
+                        if "weekly invitation limit" in post_txt or "reached the limit" in post_txt:
+                            return "LIMIT_REACHED"
+                        print(f"[Cycle:2ndDegree] -> ✅ Sent personalized connection request to {full_name} ({username})!")
+                        return True
+                else:
+                    # Free monthly custom-note cap hit or upsell shown -> reopen custom-invite and click Send without a note
+                    page.goto(invite_url, wait_until="domcontentloaded", timeout=18000)
+                    page.wait_for_timeout(1800)
+            except Exception as ne:
+                print(f"[Cycle:2ndDegree] Note fallback on {username}: {ne}")
+                try:
+                    page.goto(invite_url, wait_until="domcontentloaded", timeout=18000)
+                    page.wait_for_timeout(1800)
+                except Exception:
+                    pass
 
-        send_btn = dialog.locator('button[aria-label*="Send"], button:has-text("Send")').last
-        if send_btn.is_visible() and send_btn.is_enabled():
-            send_btn.click(no_wait_after=True)
-            page.wait_for_timeout(2000)
-            print(f"[Cycle:2ndDegree] -> Successfully sent connection request to {full_name}!")
-            return True
-
-        # Fallback to Send without a note if note limit exceeded or Send is disabled
-        send_without_note = dialog.locator('button:has-text("Send without a note"), button[aria-label*="Send without a note"]').first
-        if send_without_note.is_visible():
+        # Reliable fallback: Send without a note
+        send_without_note = page.locator('button:has-text("Send without a note"), button[aria-label*="Send without a note"]').first
+        if send_without_note.count() > 0 and send_without_note.is_visible() and send_without_note.is_enabled():
             send_without_note.click(no_wait_after=True)
-            page.wait_for_timeout(2000)
-            print(f"[Cycle:2ndDegree] -> Successfully sent connection request (without note) to {full_name}!")
+            page.wait_for_timeout(2200)
+            post_txt = (page.locator("body").inner_text() or "").lower()
+            if "weekly invitation limit" in post_txt or "reached the limit" in post_txt:
+                return "LIMIT_REACHED"
+            print(f"[Cycle:2ndDegree] -> ✅ Sent connection request (without note) to {full_name} ({username})!")
             return True
 
         return False
     finally:
         try:
             page.evaluate('() => document.querySelectorAll(".msg-overlay-container, .msg-overlay-list-bubble").forEach(el => el.remove())')
-        except:
+        except Exception:
             pass
 
+
 def discover_and_send_poc_invitation(page, context, conn) -> bool:
-    """Finds a 2nd-degree product/talent leader and sends a polite invitation."""
+    """Finds a 2nd-degree product/talent/founder leader and sends a connection invitation (LinkedIn 2026 DOM)."""
     cur = conn.cursor()
-    keywords = ['"Technical Recruiter"', '"Product Manager"', 'NSUT "Product"']
+    keywords = [
+        '"Technical Recruiter" India',
+        '"Product Recruiter" OR "Talent Acquisition" Product',
+        '"Product Manager" Gurugram OR Bengaluru',
+        'NSUT "Product Manager"',
+        '"Head of Product" OR "Founder" Gurugram OR Bengaluru',
+    ]
     kw = random.choice(keywords)
     q_kw = urllib.parse.quote(kw)
     search_url = f"https://www.linkedin.com/search/results/people/?keywords={q_kw}&network=%5B%22S%22%5D"
 
     try:
+        if page is None or page.is_closed():
+            page = context.pages[0] if context.pages else context.new_page()
         page.goto(search_url, wait_until="domcontentloaded", timeout=25000)
-        page.wait_for_timeout(3000)
-        cards = page.locator('main a[href*="/in/"]:has-text("• 2nd")').all()
-        for card in cards[:6]:
+        page.wait_for_timeout(3200)
+
+        # Extract 2nd-degree candidates that actually expose an active Connect link (`vanityName=...` or `• 2nd`)
+        candidates = page.evaluate(
+            """() => {
+                const out = [];
+                const seen = new Set();
+                const inviteLinks = Array.from(document.querySelectorAll('main a[href*="/preload/search-custom-invite/"], main a[aria-label*="Invite"][aria-label*="connect" i]'));
+                for (const inv of inviteLinks) {
+                    const href = inv.getAttribute('href') || '';
+                    const aria = inv.getAttribute('aria-label') || '';
+                    let uname = '';
+                    const m = href.match(/vanityName=([^&#]+)/);
+                    if (m) uname = decodeURIComponent(m[1]).trim();
+                    const row = inv.closest('div[role="listitem"], li') || inv.parentElement?.parentElement?.parentElement;
+                    if (!uname && row) {
+                        const pLink = row.querySelector('a[href*="/in/"]');
+                        if (pLink) {
+                            const pm = pLink.href.match(/\\/in\\/([^/?#]+)/);
+                            if (pm) uname = pm[1];
+                        }
+                    }
+                    if (!uname || seen.has(uname)) continue;
+                    const rowTxt = (row ? row.innerText : aria) || '';
+                    const lines = rowTxt.split('\\n').map(s => s.trim()).filter(Boolean);
+                    let name = aria.replace(/^Invite\\s+/i, '').replace(/\\s+to connect$/i, '').trim() || (lines[0] || uname).replace('• 2nd', '').trim();
+                    let headline = '';
+                    for (const l of lines) {
+                        if (l.includes(name) || l.startsWith('•') || l === 'Connect' || l.includes('mutual connection')) continue;
+                        headline = l;
+                        break;
+                    }
+                    seen.add(uname);
+                    out.push({ username: uname, name, headline, cardText: rowTxt.slice(0, 350) });
+                }
+                return out.slice(0, 10);
+            }"""
+        )
+
+        for cand in candidates:
             try:
-                card_text = card.inner_text().strip()
-                lines = [l.strip() for l in card_text.split("\n") if l.strip()]
-                if not lines:
-                    continue
-                name_raw = lines[0].replace("• 2nd", "").strip()
-                headline = lines[1] if len(lines) > 1 else ""
-                href = card.get_attribute("href") or ""
-                m = re.search(r"/in/([^/?#]+)", href)
-                if not m:
-                    continue
-                username = m.group(1)
+                username = cand["username"]
+                name_raw = cand["name"]
+                headline = cand["headline"]
+                card_text = cand["cardText"]
 
                 if is_excluded(name=name_raw, headline=headline, card_text=card_text):
                     continue
+                if re.search(r"\b(intern|internship|trainee|campus ambassador|fellowship)\b", headline, re.IGNORECASE):
+                    continue
 
-                cur.execute('SELECT status FROM poc_connection_requests WHERE id = ?', (username,))
+                cur.execute("SELECT status FROM poc_connection_requests WHERE id = ?", (username,))
                 if cur.fetchone():
                     continue
 
-                print(f"[Cycle:2ndDegree] Targeting 2nd-degree POC: {name_raw} ({headline[:35]})...")
+                print(f"[Cycle:2ndDegree] Targeting 2nd-degree POC: {name_raw} ({headline[:45]})...")
                 res = send_poc_request(page, username, name_raw)
                 if res == "LIMIT_REACHED":
                     return "LIMIT_REACHED"
                 if res:
-                    cur.execute('''
+                    cur.execute(
+                        """
                         INSERT OR REPLACE INTO poc_connection_requests (id, name, headline, status, requested_at)
                         VALUES (?, ?, ?, 'requested', CURRENT_TIMESTAMP)
-                    ''', (username, name_raw, headline))
+                        """,
+                        (username, name_raw, headline),
+                    )
                     conn.commit()
                     return True
-            except Exception as e:
+            except Exception:
                 continue
     except Exception as se:
         print(f"[Cycle:2ndDegree] Search error: {se}")

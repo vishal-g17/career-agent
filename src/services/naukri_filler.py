@@ -292,19 +292,27 @@ def apply_to_naukri_job(job_url: str, role_title: str = "Associate Product Manag
                             result["questions_answered"].append({"q": latest_question, "a": choice})
                             continue
 
-                        # Check for Chips, Buttons, or Quick-Replies
-                        chips = drawer.locator('.chip, .quick-reply, .chatbot_ListItem button, .chips-container button, .ssrc__checkbox-btn-container label').all()
+                        # Check for Multi-Select Checkboxes, Chips, Buttons, or Quick-Replies (including Naukri `.mcc__label` city checkboxes!)
+                        chips = drawer.locator(
+                            '.multiselectcheckboxes label, label.mcc__label, .ssrc__checkbox-btn-container label, '
+                            '.chip, .quick-reply, .chatbot_ListItem button, .chips-container button'
+                        ).all()
                         visible_chips = [c for c in chips if c.is_visible()]
                         if visible_chips:
-                            chip_texts = [c.inner_text().strip() for c in visible_chips]
-                            choice = determine_radio_choice(latest_question, chip_texts)
-                            print(f"[NaukriApply] Chip/pill options: {chip_texts} -> Selected: {choice}")
+                            chip_texts = [c.inner_text().strip() for c in visible_chips if c.inner_text().strip()]
+                            non_skip = [t for t in chip_texts if "skip" not in t.lower()]
+                            choice = determine_radio_choice(latest_question, non_skip or chip_texts)
+                            print(f"[NaukriApply] Multi/Chip options: {chip_texts} -> Selected: {choice}")
                             target_chip = next((c for c in visible_chips if choice.lower() in c.inner_text().lower()), visible_chips[0])
-                            target_chip.click()
-                            time.sleep(1)
+                            box = target_chip.bounding_box()
+                            if box:
+                                page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+                            else:
+                                target_chip.click(force=True)
+                            time.sleep(0.9)
 
-                            send_div = drawer.locator('.sendMsg, .sendMsgbtn_container, button:has-text("Save"), button:has-text("Submit")').first
-                            if send_div.is_visible():
+                            send_div = drawer.locator('.sendMsg, .sendMsgbtn_container, div.send:not(.disabled), button:has-text("Save"), button:has-text("Submit")').first
+                            if send_div.count() > 0 and send_div.is_visible():
                                 send_div.click()
                             time.sleep(2)
                             result["questions_answered"].append({"q": latest_question, "a": choice})

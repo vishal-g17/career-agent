@@ -469,49 +469,52 @@ def run_instahyre_auto_apply(max_apps: int = 10) -> Dict[str, Any]:
     except Exception as e:
         print(f"[Instahyre] candidate_matching note: {e}")
 
-    # 2. Portal-Wide Multi-Function Search (rotates offsets 0, 35, 70, 105 across sweeps!)
-    page_offset = ((_SWEEP_COUNTER - 1) % 5) * 35
+    # 2. Portal-Wide Multi-Function Search: ALWAYS check offset=0 (fresh newest jobs) PLUS deep rotating offset (35..875)!
+    rotating_offset = (((_SWEEP_COUNTER - 1) % 25) + 1) * 35
+    offsets_to_scan = [0, rotating_offset]
+    page_offset = rotating_offset
     total_scanned = len(seen_batch_jids)
-    for fn_id, _fn_label in TARGET_JOB_FUNCTIONS:
-        try:
-            js = _api_get(
-                f"/api/v1/job_search?company_size=0&job_functions={fn_id}&job_type=0&status=0&workex=1&limit=35&offset={page_offset}",
-                headers,
-            )
-            objs = js.get("objects", [])
-            total_scanned += len(objs)
-            for obj in objs:
-                jid = obj.get("id")
-                if not jid or jid in seen_batch_jids:
-                    continue
-                if obj.get("interview_status"):
-                    continue
-                if obj.get("is_active") is False:
-                    continue
-                emp = obj.get("employer") or {}
-                comp = emp.get("company_name") or ""
-                title = obj.get("title") or obj.get("candidate_title") or ""
-                pub_url = obj.get("public_url") or ""
-                locs = obj.get("locations") or ""
-                if isinstance(locs, list):
-                    locs = ", ".join(str(x) for x in locs)
-                if f"instahyre_{jid}" in seen_db_ids or (pub_url and pub_url in seen_db_urls):
-                    continue
-                sc = _score_instahyre_role(title, comp)
-                if sc >= 75:
-                    seen_batch_jids.add(jid)
-                    candidates.append(
-                        {
-                            "job_id": int(jid),
-                            "title": title,
-                            "company": comp,
-                            "public_url": pub_url,
-                            "locations": str(locs),
-                            "score": sc,
-                        }
-                    )
-        except Exception as e:
-            print(f"[Instahyre] job_search fn={fn_id} note: {e}")
+    for cur_offset in offsets_to_scan:
+        for fn_id, _fn_label in TARGET_JOB_FUNCTIONS:
+            try:
+                js = _api_get(
+                    f"/api/v1/job_search?company_size=0&job_functions={fn_id}&job_type=0&status=0&workex=1&limit=35&offset={cur_offset}",
+                    headers,
+                )
+                objs = js.get("objects", [])
+                total_scanned += len(objs)
+                for obj in objs:
+                    jid = obj.get("id")
+                    if not jid or jid in seen_batch_jids:
+                        continue
+                    if obj.get("interview_status"):
+                        continue
+                    if obj.get("is_active") is False:
+                        continue
+                    emp = obj.get("employer") or {}
+                    comp = emp.get("company_name") or ""
+                    title = obj.get("title") or obj.get("candidate_title") or ""
+                    pub_url = obj.get("public_url") or ""
+                    locs = obj.get("locations") or ""
+                    if isinstance(locs, list):
+                        locs = ", ".join(str(x) for x in locs)
+                    if f"instahyre_{jid}" in seen_db_ids or (pub_url and pub_url in seen_db_urls):
+                        continue
+                    sc = _score_instahyre_role(title, comp)
+                    if sc >= 75:
+                        seen_batch_jids.add(jid)
+                        candidates.append(
+                            {
+                                "job_id": int(jid),
+                                "title": title,
+                                "company": comp,
+                                "public_url": pub_url,
+                                "locations": str(locs),
+                                "score": sc,
+                            }
+                        )
+            except Exception as e:
+                print(f"[Instahyre] job_search fn={fn_id} offset={cur_offset} note: {e}")
 
     candidates.sort(key=lambda x: x["score"], reverse=True)
     applied_count = 0

@@ -142,7 +142,8 @@ def cloud_browser_page(
                         yield cdp_page, cdp_ctx
                     finally:
                         try:
-                            cdp_page.close()
+                            if len(cdp_ctx.pages) > 1 and not cdp_page.is_closed():
+                                cdp_page.close()
                         except Exception:
                             pass
                     return

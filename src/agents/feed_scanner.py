@@ -746,16 +746,96 @@ def _classify_post_for_engagement(
     return None
 
 
+def _dispatch_cv_for_hiring_post(post_body: str, author_name: str, role_label: str) -> bool:
+    """
+    Extracts recruiter/founder emails from a relevant hiring post and IMMEDIATELY sends
+    Vishal's tailored application email + attached Vishal_Gupta_Resume.pdf via SMTP BEFORE
+    we ever post a comment saying 'just sent my resume over mail!'.
+    Returns True ONLY if at least one valid email was genuinely sent (or already sent earlier).
+    """
+    try:
+        from ..services.cold_mailer import extract_emails_from_text, compose_cold_email, send_cold_email_smtp, get_last_sent_message_id
+    except Exception as e:
+        print(f"[FeedInteract:Mail] ColdMailer import error: {e}")
+        return False
+
+    emails = extract_emails_from_text(post_body or "")
+    if not emails:
+        return False
+
+    any_sent = False
+    for em in emails[:2]:
+        em_clean = em.strip().lower()
+        combined = f"{em_clean} {author_name} {post_body[:400]}".lower()
+        if any(fc in combined for fc in FORBIDDEN_COMPANIES) or has_forbidden_company(combined):
+            continue
+        if is_bounced_or_discarded(em_clean):
+            continue
+
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=15.0)
+            cur = conn.cursor()
+            cur.execute("SELECT status FROM outreach_leads WHERE lower(email) = ? LIMIT 1", (em_clean,))
+            row = cur.fetchone()
+            if row and row[0] in ("sent", "replied"):
+                conn.close()
+                any_sent = True
+                continue
+            conn.close()
+        except Exception:
+            pass
+
+        composed = compose_cold_email(
+            recipient_email=em_clean,
+            role_title=role_label,
+            company_name="",
+            job_context=post_body[:600],
+            tailor_with_llm=True,
+        )
+        sent_ok = send_cold_email_smtp(
+            recipient_email=em_clean,
+            subject=composed["subject"],
+            body=composed["body"],
+            sender_email=composed["sender"],
+        )
+        if sent_ok:
+            any_sent = True
+            msg_id = get_last_sent_message_id() or ""
+            try:
+                conn = sqlite3.connect(DB_PATH, timeout=15.0)
+                conn.execute(
+                    """
+                    INSERT INTO outreach_leads (name, email, company, role_target, status, created_at)
+                    VALUES (?, ?, 'Hiring Lead via LinkedIn Post', ?, 'sent', CURRENT_TIMESTAMP)
+                    ON CONFLICT(email) DO UPDATE SET status='sent'
+                    """,
+                    (author_name[:80], em_clean, role_label[:60]),
+                )
+                conn.commit()
+                conn.close()
+            except Exception:
+                try:
+                    conn = sqlite3.connect(DB_PATH, timeout=15.0)
+                    conn.execute("UPDATE outreach_leads SET status='sent' WHERE lower(email)=?", (em_clean,))
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+            print(f"  📧 [FeedInteract:Mail] Immediately sent CV email to {em_clean} for {role_label} ({msg_id[:36]})!")
+
+    return any_sent
+
+
 def _generate_contextual_comment(
     author_name: str,
     author_headline: str,
     post_body: str,
     category: str,
-    has_email_in_post: bool = False,
+    email_actually_sent: bool = False,
 ) -> Optional[str]:
     """
     Generates a short, crisp, genuinely human 1-sentence LinkedIn comment (7-16 words, <=115 chars).
-    Zero AI corporate jargon.
+    Zero AI corporate jargon. Never claims CV was emailed unless `email_actually_sent` is True.
     """
     first_name = author_name.split()[0] if author_name else ""
     is_company_page = any(
@@ -766,9 +846,9 @@ def _generate_contextual_comment(
         role_m = STRICT_MY_ROLES_RE.search(post_body)
         role_label = role_m.group(0) if role_m else "Product/Analyst"
         name_prefix = f"Hi {first_name}, " if (first_name and not is_company_page and len(first_name) >= 3) else ""
-        if has_email_in_post:
+        if email_actually_sent:
             return f"{name_prefix}super keen on the {role_label} role, just sent my resume over mail!"[:120]
-        return f"{name_prefix}very interested in the {role_label} role (NSUT '26, 1 yr product & analytics exp). Would love to connect!"[:125]
+        return f"{name_prefix}super interested in the {role_label} role (NSUT '26, 1 yr product & analytics exp)!"[:120]
 
     system_prompt = (
         "Write ONE short, casual, crisp human comment on a LinkedIn post (strictly 7 to 15 words, max 105 characters).\n"
@@ -962,13 +1042,17 @@ def _interact_with_visible_posts(
             comment_text = ""
 
             if do_comment:
-                has_em = bool(EMAIL_RE.search(body))
+                sent_cv_ok = False
+                if category == "hiring_decision_maker" and EMAIL_RE.search(body):
+                    rm = STRICT_MY_ROLES_RE.search(body)
+                    r_lbl = rm.group(0) if rm else "Product / Analytics"
+                    sent_cv_ok = _dispatch_cv_for_hiring_post(body, author_name, r_lbl)
                 draft_cmt = _generate_contextual_comment(
                     author_name=author_name,
                     author_headline=headline,
                     post_body=body,
                     category=category,
-                    has_email_in_post=has_em,
+                    email_actually_sent=sent_cv_ok,
                 )
                 if draft_cmt:
                     c_toggle = card_loc.locator('button[aria-label="Comment"]').first
@@ -1332,7 +1416,8 @@ def scan_personal_feed_and_hiring_posts(duration_minutes: float = 10.0) -> List[
                     pass
         finally:
             try:
-                page.close()
+                if len(context.pages) > 1 and not page.is_closed():
+                    page.close()
             except Exception:
                 pass
 
