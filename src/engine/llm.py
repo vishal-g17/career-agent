@@ -4,6 +4,7 @@ import time
 import urllib.request
 import urllib.error
 from typing import Optional
+from .. import config
 
 # Priority chain: Claude Opus 4.6 → Claude Sonnet 4.6 → Gemini 3.8 Flash
 CLAUDE_MODELS = [
@@ -12,10 +13,11 @@ CLAUDE_MODELS = [
 ]
 
 GEMINI_MODELS = [
+    "gemini-3.5-flash",
     "gemini-3-flash-preview",
+    "gemini-3.8-flash",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-3.5-flash",
 ]
 
 _MODEL_COOLDOWN_UNTIL: dict[str, float] = {}
