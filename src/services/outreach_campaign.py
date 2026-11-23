@@ -325,7 +325,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
     fu1_rows = conn.execute(
         """
         SELECT * FROM outreach_leads 
-        WHERE status = 'sent' AND COALESCE(followup_count, 0) = 0 
+        WHERE status IN ('sent', 'auto_replied') AND COALESCE(followup_count, 0) = 0 
           AND first_sent_at IS NOT NULL
           AND first_sent_at <= datetime('now', '-2 days')
         ORDER BY first_sent_at ASC
@@ -337,7 +337,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
     fu2_rows = conn.execute(
         """
         SELECT * FROM outreach_leads 
-        WHERE status = 'sent' AND followup_count = 1 
+        WHERE status IN ('sent', 'auto_replied') AND followup_count = 1 
           AND followup_1_at IS NOT NULL
           AND followup_1_at <= datetime('now', '-4 days')
         ORDER BY followup_1_at ASC
@@ -393,7 +393,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
                     break
                 with database.get_connection() as chk_c:
                     cur_row = chk_c.execute("SELECT status FROM outreach_leads WHERE id = ?", (lead_id,)).fetchone()
-                    if not cur_row or cur_row["status"] != "sent":
+                    if not cur_row or cur_row["status"] not in ("sent", "auto_replied"):
                         continue
 
             last_subj = (lead.get("last_subject") or "").strip() or (
@@ -405,7 +405,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
             if stage == 1:
                 body = (
                     f"{salutation}\n\n"
-                    "Hope you had a great Diwali break! Following up briefly on my previous note in case it got buried.\n\n"
+                    "Hope you're having a productive week! Following up briefly on my previous note in case it got buried.\n\n"
                     "I’m a B.Tech Mathematics & Computing graduate from NSUT Delhi and an immediate joiner (15 days) "
                     "with 1 year of full-time experience across product analytics, conversion optimization, merchant growth, and Python/SQL automation.\n\n"
                     f"If there are any openings across Product Analyst, Business Analyst, APM, or Founder's Office roles {at_org}, "
@@ -452,7 +452,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
                                 UPDATE outreach_leads 
                                 SET followup_count = 1, followup_1_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP,
                                     last_subject = ?, last_message_id = COALESCE(?, last_message_id)
-                                WHERE id = ? AND status = 'sent'
+                                WHERE id = ? AND status IN ('sent', 'auto_replied')
                                 """,
                                 (subject, new_mid, lead_id),
                             )
@@ -463,7 +463,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
                                 """
                                 UPDATE outreach_leads 
                                 SET followup_count = 2, followup_2_at = CURRENT_TIMESTAMP, last_sent_at = CURRENT_TIMESTAMP, status = 'unresponsive'
-                                WHERE id = ? AND status = 'sent'
+                                WHERE id = ? AND status IN ('sent', 'auto_replied')
                                 """,
                                 (lead_id,),
                             )
@@ -484,7 +484,7 @@ def process_pending_followups(max_followups: int = 30) -> Dict[str, Any]:
         due_rem = rem_c.execute(
             """
             SELECT COUNT(*) FROM outreach_leads
-            WHERE status = 'sent'
+            WHERE status IN ('sent', 'auto_replied')
               AND (
                   (COALESCE(followup_count, 0) = 0 AND first_sent_at <= datetime('now', '-2 days'))
                   OR (followup_count = 1 AND followup_1_at <= datetime('now', '-4 days'))
@@ -503,20 +503,22 @@ def get_campaign_stats() -> Dict[str, Any]:
     
     total = c.execute("SELECT count(*) FROM outreach_leads").fetchone()[0]
     pending = c.execute("SELECT count(*) FROM outreach_leads WHERE status = 'pending'").fetchone()[0]
-    sent_total = c.execute("SELECT count(*) FROM outreach_leads WHERE status = 'sent'").fetchone()[0]
+    sent_total = c.execute("SELECT count(*) FROM outreach_leads WHERE status IN ('sent', 'auto_replied')").fetchone()[0]
+    auto_replied = c.execute("SELECT count(*) FROM outreach_leads WHERE status = 'auto_replied'").fetchone()[0]
     replied = c.execute("SELECT count(*) FROM outreach_leads WHERE status = 'replied'").fetchone()[0]
     bounced = c.execute("SELECT count(*) FROM outreach_leads WHERE status = 'bounced'").fetchone()[0]
     fu1 = c.execute("SELECT count(*) FROM outreach_leads WHERE followup_count = 1").fetchone()[0]
     fu2 = c.execute("SELECT count(*) FROM outreach_leads WHERE followup_count = 2").fetchone()[0]
     
     # Sender breakdown
-    c.execute("SELECT sender_email, count(*) FROM outreach_leads WHERE status = 'sent' GROUP BY 1")
+    c.execute("SELECT sender_email, count(*) FROM outreach_leads WHERE status IN ('sent', 'auto_replied') GROUP BY 1")
     sender_counts = dict(c.fetchall())
 
     return {
         "total_leads": total,
         "pending": pending,
         "sent_total": sent_total,
+        "auto_replied": auto_replied,
         "replied": replied,
         "bounced": bounced,
         "followup_1_active": fu1,

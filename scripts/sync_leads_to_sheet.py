@@ -54,8 +54,8 @@ def export_split_leads():
             """
             SELECT *
             FROM outreach_leads
-            WHERE status IN ('sent', 'replied', 'pending', 'unresponsive', 'closed_no_opening')
-            ORDER BY CASE status WHEN 'replied' THEN 1 WHEN 'sent' THEN 2 WHEN 'pending' THEN 3 WHEN 'closed_no_opening' THEN 4 ELSE 5 END,
+            WHERE status IN ('sent', 'replied', 'pending', 'unresponsive', 'closed_no_opening', 'auto_replied')
+            ORDER BY CASE status WHEN 'replied' THEN 1 WHEN 'sent' THEN 2 WHEN 'auto_replied' THEN 3 WHEN 'pending' THEN 4 WHEN 'closed_no_opening' THEN 5 ELSE 6 END,
                      COALESCE(last_sent_at, first_sent_at, '') DESC, id DESC
             """
         ).fetchall()

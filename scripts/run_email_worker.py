@@ -39,7 +39,7 @@ def run_continuous_email_worker(batch_size: int = 20, pause_between_batches: int
             print(
                 f"[EmailWorker:Pass #{pass_num}] Complete: Fresh Sent {res['sent']}, "
                 f"Follow-ups ({'ON' if fu_active else 'PAUSED'}): FU1={fu_res['followup_1_sent']}, FU2={fu_res['followup_2_sent']} (Due rem: {fu_res.get('due_remaining', 0)}) | "
-                f"Total Sent: {stats.get('sent_total', 0)}, Replied: {stats.get('replied', 0)}, Pending: {stats.get('pending', 0)}"
+                f"Total Sent: {stats.get('sent_total', 0)}, Auto-Replied: {stats.get('auto_replied', 0)}, Replied: {stats.get('replied', 0)}, Pending: {stats.get('pending', 0)}"
             )
 
             if res.get("daily_cap_reached") and fu_sent_now == 0:

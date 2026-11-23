@@ -41,7 +41,7 @@ def build_dashboard_html() -> str:
     cur.execute("SELECT count(*) FROM jobs WHERE status = 'applied'")
     total_applied = cur.fetchone()[0]
 
-    cur.execute("SELECT count(*) FROM outreach_leads WHERE status IN ('sent', 'replied')")
+    cur.execute("SELECT count(*) FROM outreach_leads WHERE status IN ('sent', 'replied', 'auto_replied', 'unresponsive')")
     total_emails_sent = cur.fetchone()[0]
 
     cur.execute("SELECT count(*) FROM outreach_leads WHERE status = 'replied'")
@@ -78,7 +78,7 @@ def build_dashboard_html() -> str:
     cur.execute("""
         SELECT name, email, company, role_target, status, first_sent_at, sender_email
         FROM outreach_leads 
-        WHERE status IN ('sent', 'replied')
+        WHERE status IN ('sent', 'replied', 'auto_replied')
         ORDER BY first_sent_at DESC
         LIMIT 150
     """)

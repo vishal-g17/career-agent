@@ -118,8 +118,8 @@ def build_live_sheet_html() -> str:
                COALESCE(sender_email, '') AS sender_email,
                COALESCE(reply_snippet, '') AS reply_snippet
         FROM outreach_leads
-        WHERE status IN ('replied', 'sent', 'pending', 'unresponsive')
-        ORDER BY CASE status WHEN 'replied' THEN 1 WHEN 'sent' THEN 2 WHEN 'pending' THEN 3 ELSE 4 END,
+        WHERE status IN ('replied', 'sent', 'pending', 'unresponsive', 'auto_replied', 'closed_no_opening')
+        ORDER BY CASE status WHEN 'replied' THEN 1 WHEN 'auto_replied' THEN 2 WHEN 'sent' THEN 3 WHEN 'pending' THEN 4 ELSE 5 END,
                  sent_ts DESC, id DESC
         """
     ).fetchall()
@@ -127,14 +127,14 @@ def build_live_sheet_html() -> str:
     conn.close()
 
     total_clean = len(rows)
-    sent_cnt = sum(1 for r in rows if r["status"] in ("sent", "unresponsive"))
+    sent_cnt = sum(1 for r in rows if r["status"] in ("sent", "unresponsive", "auto_replied"))
     pend_cnt = sum(1 for r in rows if r["status"] == "pending")
     rep_cnt = sum(1 for r in rows if r["status"] == "replied")
 
     tr_parts = []
     for idx, r in enumerate(rows, 1):
         st = (r["status"] or "pending").lower()
-        badge_cls = "st-replied" if st == "replied" else ("st-sent" if st in ("sent", "unresponsive") else "st-pending")
+        badge_cls = "st-replied" if st == "replied" else ("st-auto-replied" if st == "auto_replied" else ("st-sent" if st in ("sent", "unresponsive") else "st-pending"))
         name_e = html.escape(r["name"] or "Hiring Team")
         email_e = html.escape(r["email"] or "")
         comp_e = html.escape(r["company"] or "")

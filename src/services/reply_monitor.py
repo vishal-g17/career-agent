@@ -1,8 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
+import base64
 import email
 from email.header import decode_header
 import imaplib
 import os
+import quopri
 import re
 import sqlite3
 from datetime import datetime, timedelta
@@ -292,43 +294,166 @@ def process_and_clean_bounces(mail: imaplib.IMAP4_SSL, user_email: str) -> List[
     return []
 
 
-def _extract_clean_reply_body(raw_bytes: bytes) -> str:
+def _extract_clean_reply_body(raw_bytes) -> str:
+    """
+    Robustly extracts decoded plain text from an inbound email (bytes or string),
+    handling multipart streams, base64 payloads, quoted-printable encoding,
+    Outlook/Exchange boundaries (_000_), HTML tags, and charset variations.
+    """
+    if not raw_bytes:
+        return ""
     try:
-        msg = email.message_from_bytes(raw_bytes)
+        raw_str = raw_bytes.decode("utf-8", errors="ignore") if isinstance(raw_bytes, bytes) else str(raw_bytes)
+        s_strip = raw_str.strip()
+
+        # Handle base64-encoded HTML strings (e.g. PGRp... / PGh0...)
+        if s_strip.startswith(("PGRp", "PGh0")):
+            b = s_strip.encode("ascii", errors="ignore")
+            b = b[:len(b) - (len(b) % 4)]
+            try:
+                dec = base64.b64decode(b).decode("utf-8", errors="ignore")
+                return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", dec)).strip()
+            except Exception:
+                pass
+
+        # If it is a MIME stream missing top headers (starts with boundary like --)
+        if s_strip.startswith("--"):
+            m = re.match(r"^--([^\r\n\s]+)", s_strip)
+            if m:
+                fake_boundary = m.group(1).rstrip("-")
+                if f'boundary="{fake_boundary}"' not in raw_str[:200]:
+                    raw_str = f'Content-Type: multipart/mixed; boundary="{fake_boundary}"\r\n\r\n' + raw_str
+
+        msg = email.message_from_string(raw_str)
         plain_parts: List[str] = []
         html_parts: List[str] = []
+
         for part in (msg.walk() if msg.is_multipart() else [msg]):
             ctype = part.get_content_type()
             disp = str(part.get("Content-Disposition") or "")
             if "attachment" in disp.lower():
                 continue
-            payload = part.get_payload(decode=True)
-            if isinstance(payload, bytes):
-                txt = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+            cte = (part.get("Content-Transfer-Encoding") or "").lower()
+            charset = part.get_content_charset() or "utf-8"
+
+            payload = part.get_payload()
+            if isinstance(payload, str):
+                txt = payload
+                if "base64" in cte:
+                    clean_b = re.sub(r"\s+", "", payload).encode("ascii", errors="ignore")
+                    clean_b = clean_b[:len(clean_b) - (len(clean_b) % 4)]
+                    try:
+                        txt = base64.b64decode(clean_b).decode(charset, errors="ignore")
+                    except Exception:
+                        pass
+                elif "quoted-printable" in cte:
+                    try:
+                        txt = quopri.decodestring(payload.encode("ascii", errors="ignore")).decode(charset, errors="ignore")
+                    except Exception:
+                        pass
+
                 if ctype == "text/plain":
                     plain_parts.append(txt)
                 elif ctype == "text/html":
                     html_parts.append(re.sub(r"<[^>]+>", " ", txt))
+            elif isinstance(payload, bytes):
+                try:
+                    txt = payload.decode(charset, errors="ignore")
+                    if ctype == "text/plain":
+                        plain_parts.append(txt)
+                    elif ctype == "text/html":
+                        html_parts.append(re.sub(r"<[^>]+>", " ", txt))
+                except Exception:
+                    pass
+
         body = "\n".join(plain_parts).strip() or "\n".join(html_parts).strip()
-        return re.sub(r"\s+", " ", body).strip()
+        if body:
+            clean = re.sub(r"<[^>]+>", " ", body)
+            clean = re.sub(r"--[a-zA-Z0-9_-]+", " ", clean)
+            clean = re.sub(r"Content-(?:Type|Transfer-Encoding):[^\n]+", " ", clean, flags=re.IGNORECASE)
+            return re.sub(r"\s+", " ", clean).strip()
+
+        # Fallback regex decoders if walking didn't catch text
+        b64_blocks = re.findall(r"(?:base64\s+)([A-Za-z0-9+/=\s]{20,})", raw_str, re.IGNORECASE)
+        for block in b64_blocks:
+            clean_b = re.sub(r"\s+", "", block).encode("ascii", errors="ignore")
+            clean_b = clean_b[:len(clean_b) - (len(clean_b) % 4)]
+            try:
+                dec = base64.b64decode(clean_b).decode("utf-8", errors="ignore")
+                if dec and len(dec.strip()) > 5:
+                    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", dec)).strip()
+            except Exception:
+                pass
+
+        qp_blocks = re.findall(r"(?:quoted-printable\s+)([\s\S]+?)(?:--|$)", raw_str, re.IGNORECASE)
+        for block in qp_blocks:
+            try:
+                dec = quopri.decodestring(block.encode("ascii", errors="ignore")).decode("utf-8", errors="ignore")
+                if dec and len(dec.strip()) > 5:
+                    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", dec)).strip()
+            except Exception:
+                pass
+
+        clean_fallback = re.sub(r"<[^>]+>", " ", raw_str[:500])
+        clean_fallback = re.sub(r"--[a-zA-Z0-9_-]+", " ", clean_fallback)
+        return re.sub(r"\s+", " ", clean_fallback).strip()
     except Exception:
-        return raw_bytes.decode("utf-8", errors="ignore")[:500].strip()
+        return raw_bytes.decode("utf-8", errors="ignore")[:400].strip() if isinstance(raw_bytes, bytes) else str(raw_bytes)[:400].strip()
 
 
-def classify_inbound_reply(subject: str, body: str, auto_submitted_hdr: str = "") -> str:
+def classify_inbound_reply(subject: str, body: str, auto_submitted_hdr: str = "", from_addr: str = "") -> str:
     """
     Classifies an inbound recruiter email into one of:
       - 'exited_redirected': Exited employee / deactivated / unmonitored mailbox
-      - 'ooo_auto_reply': Out-of-office / holiday / Diwali / travel auto-responder (keep lead eligible for follow-ups!)
       - 'closed_no_opening': Explicit rejection / not hiring / no openings matching profile
-      - 'replied': Genuine human reply
+      - 'auto_reply': Automated responses (out-of-office / holiday / Diwali / travel auto-responder,
+                      ATS receipt, bot ticketing confirmation, Foundit / job board portal auto-ack).
+                      CRITICAL: Lead MUST remain eligible for scheduled follow-ups!
+      - 'replied': Genuine human reply written personally by recruiter, hiring manager, or founder.
+                   CRITICAL: Lead is STRICTLY EXCLUDED from any follow-up emails!
     """
-    s_low = (subject or "").lower()
-    # Strip quoted original message so we classify ONLY the sender's reply text
-    top_body = re.split(r"\bon\s+(?:mon|tue|wed|thu|fri|sat|sun|\d{1,2}\s+[a-z]{3})|-----original message-----", body or "", maxsplit=1, flags=re.IGNORECASE)[0]
-    b_low = top_body.lower()
-    auto_low = (auto_submitted_hdr or "").lower()
+    s_low = (subject or "").lower().strip()
+    auto_low = (auto_submitted_hdr or "").lower().strip()
+    from_low = (from_addr or "").lower().strip()
 
+    # 1. Header & system bot indicators -> Instant automated reply
+    if auto_low and auto_low != "no":
+        return "auto_reply"
+    if any(bot_id in from_low for bot_id in ("mailer-daemon", "postmaster", "noreply", "no-reply", "donotreply", "notifications@", "notification@", "system@")):
+        return "auto_reply"
+
+    # 2. Subject indicators -> Instant automated reply
+    ooo_subject_keywords = (
+        "automatic reply",
+        "auto-reply",
+        "autoreply",
+        "out of office",
+        "ooo",
+        "auto response",
+        "undeliverable",
+        "delivery status notification",
+        "failure notice",
+        "returned mail",
+        "acknowledgment",
+        "we received your",
+        "thank you for applying",
+        "application received",
+        "thank you for contacting",
+        "thank you for your inquiry",
+    )
+    if any(k in s_low for k in ooo_subject_keywords):
+        return "auto_reply"
+
+    # Strip quoted original message so we classify ONLY the sender's newly written reply text
+    top_body = re.split(
+        r"\bon\s+(?:mon|tue|wed|thu|fri|sat|sun|\d{1,2}\s+[a-z]{3})|-----original message-----",
+        body or "",
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    b_low = top_body.lower().strip()
+
+    # 3. Exited employee / deactivated mailbox
     exited_phrases = (
         "no longer employed",
         "no longer with the company",
@@ -344,29 +469,37 @@ def classify_inbound_reply(subject: str, body: str, auto_submitted_hdr: str = ""
         "last working day with the organization",
         "accounts will be deactivated",
         "going forward, please use my ",
+        "no longer a student",
     )
     if any(p in b_low for p in exited_phrases):
         return "exited_redirected"
 
+    # 4. Explicit rejection / closed opening / not hiring
     no_opening_phrases = (
         "unfortunately, we are not currently hiring",
         "we are not currently hiring",
         "not hiring at the moment",
         "don't have openings",
-        "don\u2019t have openings",
+        "don’t have openings",
         "do not have any openings",
         "do not have openings",
         "do not have any vacancies",
         "not able to take your candidature forward",
         "will not be moving forward with your application",
         "there is no opening",
+        "there are no opening",
         "no current openings",
+        "position is filled",
+        "role is filled",
+        "do not have open role matching",
+        "no opening for these mentioned roles",
+        "no openings for these mentioned roles",
     )
     if any(p in b_low for p in no_opening_phrases):
         return "closed_no_opening"
 
-    ooo_subject_prefixes = ("automatic reply:", "out of office", "auto response", "auto-reply", "ooo ", "ooo:")
-    ooo_body_phrases = (
+    # 5. Out of office / leave / vacation auto-responder phrases (Keep eligible for follow-up!)
+    ooo_phrases = (
         "out of office",
         "out of the office",
         "currently on leave",
@@ -374,20 +507,62 @@ def classify_inbound_reply(subject: str, body: str, auto_submitted_hdr: str = ""
         "will be on leave",
         "on planned leave",
         "annual leave",
+        "on pto",
         "am ooo",
         "i will be ooo",
         "i am ooo",
         "limited access to email",
         "limited access to my email",
         "limited access to mails",
+        "limited access to emails",
+        "no access to email",
+        "no access to my email",
         "no access to mails",
+        "no access to emails",
         "away from the office",
-        "out of the country on business travel",
-        "i am on travel",
+        "away from my desk",
+        "away from office",
+        "on business travel",
+        "on travel",
+        "on holiday",
+        "shall respond upon my return",
+        "will respond upon my return",
+        "will respond once i resume",
+        "shall respond on resuming",
+        "will respond as soon as possible upon",
+        "in my absence",
+        "urgent matters, please reach",
+        "urgent matters please contact",
+        "out of office today",
     )
-    if s_low.startswith(ooo_subject_prefixes) or any(p in b_low for p in ooo_body_phrases) or ("auto-replied" in auto_low):
-        return "ooo_auto_reply"
+    if any(p in b_low for p in ooo_phrases):
+        return "auto_reply"
 
+    # 6. Automated ATS / Ticketing / Bot Acknowledgment phrases (Keep eligible for follow-up!)
+    bot_phrases = (
+        "this is an automated response",
+        "this is an automatically generated",
+        "please do not reply to this email",
+        "do not reply to this message",
+        "do not reply directly to this",
+        "this mailbox is not monitored",
+        "this inbox is not monitored",
+        "unmonitored mailbox",
+        "we have received your application",
+        "we received your application",
+        "thank you for your interest in the",
+        "thank you for submitting your application",
+        "complete your foundit profile",
+        "to proceed with the application process, please complete your foundit",
+        "your request (#",
+        "your ticket #",
+        "ticket has been created",
+        "thank you for contacting the hiring team",
+    )
+    if any(p in b_low for p in bot_phrases):
+        return "auto_reply"
+
+    # 7. Genuine Human Reply (Written personally by human recruiter/founder/HM)
     return "replied"
 
 
@@ -411,7 +586,7 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
 
         conn = database.get_connection()
         active_leads = conn.execute(
-            "SELECT id, name, email, company, status, sender_email, COALESCE(reply_snippet, '') AS reply_snippet FROM outreach_leads WHERE status IN ('sent', 'pending')"
+            "SELECT id, name, email, company, status, sender_email, COALESCE(reply_snippet, '') AS reply_snippet FROM outreach_leads WHERE status IN ('sent', 'pending', 'auto_replied')"
         ).fetchall()
         conn.close()
         lead_map = {row["email"].lower(): row for row in active_leads if row["email"]}
@@ -470,16 +645,22 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
                 except Exception:
                     snippet = f"New reply received in your {account_label} inbox."
 
-                reply_kind = classify_inbound_reply(subject, snippet, auto_sub)
+                reply_kind = classify_inbound_reply(subject, snippet, auto_sub, sender_email)
 
-                if reply_kind == "ooo_auto_reply":
-                    # Keep status='sent' so post-holiday follow-ups still fire!
-                    if not (lead["reply_snippet"] or "").startswith("[OOO]"):
-                        with database.get_connection() as c:
-                            c.execute(
-                                "UPDATE outreach_leads SET reply_snippet = ? WHERE id = ? AND status = 'sent'",
-                                (f"[OOO] {snippet[:380]}", lead_id),
-                            )
+                if reply_kind in ("auto_reply", "ooo_auto_reply"):
+                    # Automated response (OOO, holiday, vacation, ATS receipt, bot auto-responder).
+                    # Lead remains 100% ELIGIBLE for scheduled cold email follow-ups!
+                    clean_auto_snippet = f"[AUTO] {snippet[:380]}"
+                    with database.get_connection() as c:
+                        c.execute(
+                            """
+                            UPDATE outreach_leads 
+                            SET status = 'auto_replied', reply_snippet = ?
+                            WHERE id = ? AND status IN ('sent', 'pending', 'auto_replied')
+                            """,
+                            (clean_auto_snippet, lead_id),
+                        )
+                    print(f"[ReplyMonitor] 🤖 Automated response detected for {name} ({company}, {sender_email}) -> Tagged 'auto_replied' (eligible for follow-up).")
                     del lead_map[sender_email]
                     continue
 
@@ -493,9 +674,12 @@ def check_account_replies(user_email: str, app_password: str, account_label: str
                             """,
                             (reply_kind, snippet[:400], lead_id),
                         )
+                    print(f"[ReplyMonitor] 🛑 Lead {name} ({company}) marked as {reply_kind}: {snippet[:80]}")
                     del lead_map[sender_email]
                     continue
 
+                # GENUINE HUMAN REPLY: Written personally by recruiter / founder / HM.
+                # Lead is STRICTLY EXCLUDED from any follow-up emails!
                 with database.get_connection() as c:
                     c.execute(
                         """
